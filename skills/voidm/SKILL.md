@@ -180,7 +180,20 @@ action=ontology_hierarchy, id="b8f90a79"
 action=ontology_instances, id="319c58af"
 ```
 
-### Ontology workflow
+### Entity extraction from raw text
+
+```
+# Propose candidates without writing anything
+action=ontology_extract, text="Google and Microsoft are competing in the cloud market", min_score=0.7
+
+# Extract and auto-add new ones as concepts
+action=ontology_extract, text="auth-service and payment-service are microservices in our platform", add=true, scope=software
+```
+
+Entity types returned: `PER` (person), `ORG` (organisation), `LOC` (location), `MISC` (other).
+Downloads `Xenova/bert-base-NER` (~103MB) on first use.
+
+
 
 1. Define top-level concepts with `concept_add`
 2. Build hierarchy with `ontology_link` + `IS_A`

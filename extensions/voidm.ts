@@ -61,7 +61,7 @@ interface MemoryDetails {
 	action: "add" | "search" | "list" | "delete" | "link" | "neighbors" | "pagerank" | "cypher"
 		| "concept_add" | "concept_get" | "concept_list" | "concept_delete"
 		| "ontology_link" | "ontology_unlink" | "ontology_edges"
-		| "ontology_hierarchy" | "ontology_instances";
+		| "ontology_hierarchy" | "ontology_instances" | "ontology_extract";
 	memories: Memory[];
 	concepts?: Concept[];
 	error?: string;
@@ -127,7 +127,7 @@ const MemoryParams = Type.Object({
 		// Ontology actions
 		"concept_add", "concept_get", "concept_list", "concept_delete",
 		"ontology_link", "ontology_unlink", "ontology_edges",
-		"ontology_hierarchy", "ontology_instances",
+		"ontology_hierarchy", "ontology_instances", "ontology_extract",
 	] as const),
 
 	// add
@@ -184,8 +184,10 @@ const MemoryParams = Type.Object({
 	name: Type.Optional(Type.String({ description: "Concept name (for concept_add)" })),
 	description: Type.Optional(Type.String({ description: "Concept description (for concept_add)" })),
 
-	// ontology: link
-	from_kind: Type.Optional(StringEnum(["concept", "memory"] as const, { description: "Source node kind for ontology_link (default: concept)" })),
+	// ontology: extract
+	text: Type.Optional(Type.String({ description: "Raw text for entity extraction (for ontology_extract)" })),
+	min_score: Type.Optional(Type.Number({ description: "Min NER confidence score 0-1 (for ontology_extract, default 0.7)" })),
+	add: Type.Optional(Type.Boolean({ description: "Auto-add new candidates as concepts (for ontology_extract)" })),
 	to_kind: Type.Optional(StringEnum(["concept", "memory"] as const, { description: "Target node kind for ontology_link (default: concept)" })),
 	edge_id: Type.Optional(Type.Number({ description: "Ontology edge integer ID (for ontology_unlink)" })),
 });
@@ -539,8 +541,12 @@ Actions:
   ontology_hierarchy  Show ancestors and descendants of a concept via IS_A chain. Required: id.
                       Returns the full class hierarchy above and below the concept.
 
-  ontology_instances  List all instances of a concept, including instances of subclasses (full subsumption).
-                      Required: id. Returns memories and concepts linked via INSTANCE_OF.`,
+  ontology_extract  Extract named entities from raw text and propose them as concept candidates.
+                    Required: text. Optional: min_score (0-1, default 0.7), add (bool, auto-add new), scope.
+                    Downloads Xenova/bert-base-NER (~103MB) on first use.
+                    Entity types: PER (person), ORG (organisation), LOC (location), MISC (other).
+                    Without add=true, only proposes — no concepts are written.
+                    With add=true, new candidates are created as concepts automatically.`,
 
 		parameters: MemoryParams,
 
@@ -894,6 +900,30 @@ Actions:
 						};
 					}
 
+					case "ontology_extract": {
+						if (!params.text) return err("ontology_extract", "text is required");
+						const args = ["ontology", "extract", "--json"];
+						if (params.min_score != null) args.push("--min-score", String(params.min_score));
+						if (params.add) args.push("--add");
+						if (params.scope) args.push("--scope", params.scope);
+						args.push("--", params.text);
+						const { stdout, code } = await execVoidm(args);
+						if (code !== 0) return err("ontology_extract", parseJson<any>(stdout)?.error ?? stdout);
+						const candidates = parseJson<any[]>(stdout) ?? [];
+						const newOnes = candidates.filter(c => !c.already_exists);
+						const existing = candidates.filter(c => c.already_exists);
+						let text = `${candidates.length} candidate(s) extracted`;
+						if (candidates.length) {
+							text += `\nNew (${newOnes.length}): ${newOnes.map(c => `${c.name} [${c.entity_type}]`).join(", ")}`;
+							if (existing.length) text += `\nAlready exist (${existing.length}): ${existing.map(c => c.name).join(", ")}`;
+						}
+						if (params.add && newOnes.length) text += `\n✓ ${newOnes.length} concept(s) added.`;
+						return {
+							content: [{ type: "text", text }],
+							details: { action: "ontology_extract", memories: [], concepts: newOnes, message: text } as MemoryDetails,
+						};
+					}
+
 					default:
 						return err("list", `Unknown action: ${(params as any).action}`);
 				}
@@ -975,6 +1005,15 @@ Actions:
 				case "ontology_edges":    return new Text(theme.fg("muted", d.message ?? "edges"), 0, 0);
 				case "ontology_hierarchy":return new Text(theme.fg("muted", d.message ?? "hierarchy"), 0, 0);
 				case "ontology_instances":return new Text(theme.fg("muted", d.message ?? "instances"), 0, 0);
+				case "ontology_extract": {
+					const cs = d.concepts ?? [];
+					return new Text(
+						cs.length
+							? theme.fg("success", "✓ ") + theme.fg("muted", `${cs.length} new concept(s): `) + theme.fg("accent", cs.slice(0,3).map((c: any) => c.name ?? c).join(", "))
+							: theme.fg("muted", d.message ?? "extracted"),
+						0, 0
+					);
+				}
 				default:         return new Text(theme.fg("muted", d.message ?? "done"), 0, 0);
 			}
 		},
