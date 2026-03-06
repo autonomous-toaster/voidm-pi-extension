@@ -61,7 +61,7 @@ interface MemoryDetails {
 	action: "add" | "search" | "list" | "delete" | "link" | "neighbors" | "pagerank" | "cypher"
 		| "concept_add" | "concept_get" | "concept_list" | "concept_delete"
 		| "ontology_link" | "ontology_unlink" | "ontology_edges"
-		| "ontology_hierarchy" | "ontology_instances" | "ontology_extract";
+		| "ontology_hierarchy" | "ontology_instances" | "ontology_extract" | "ontology_enrich_memories";
 	memories: Memory[];
 	concepts?: Concept[];
 	error?: string;
@@ -128,6 +128,7 @@ const MemoryParams = Type.Object({
 		"concept_add", "concept_get", "concept_list", "concept_delete",
 		"ontology_link", "ontology_unlink", "ontology_edges",
 		"ontology_hierarchy", "ontology_instances", "ontology_extract",
+		"ontology_enrich_memories",
 	] as const),
 
 	// add
@@ -186,8 +187,11 @@ const MemoryParams = Type.Object({
 
 	// ontology: extract
 	text: Type.Optional(Type.String({ description: "Raw text for entity extraction (for ontology_extract)" })),
-	min_score: Type.Optional(Type.Number({ description: "Min NER confidence score 0-1 (for ontology_extract, default 0.7)" })),
-	add: Type.Optional(Type.Boolean({ description: "Auto-add new candidates as concepts (for ontology_extract)" })),
+	min_score: Type.Optional(Type.Number({ description: "Min NER confidence score 0-1 (for ontology_extract / ontology_enrich_memories, default 0.7)" })),
+	add: Type.Optional(Type.Boolean({ description: "Auto-add new candidates as concepts (for ontology_extract / ontology_enrich_memories)" })),
+	force: Type.Optional(Type.Boolean({ description: "Re-process already-enriched memories (for ontology_enrich_memories)" })),
+	dry_run: Type.Optional(Type.Boolean({ description: "Simulate without writing (for ontology_enrich_memories)" })),
+	limit: Type.Optional(Type.Number({ description: "Max memories to process (for ontology_enrich_memories, 0=all)" })),
 	to_kind: Type.Optional(StringEnum(["concept", "memory"] as const, { description: "Target node kind for ontology_link (default: concept)" })),
 	edge_id: Type.Optional(Type.Number({ description: "Ontology edge integer ID (for ontology_unlink)" })),
 });
@@ -546,7 +550,14 @@ Actions:
                     Downloads Xenova/bert-base-NER (~103MB) on first use.
                     Entity types: PER (person), ORG (organisation), LOC (location), MISC (other).
                     Without add=true, only proposes — no concepts are written.
-                    With add=true, new candidates are created as concepts automatically.`,
+                    With add=true, new candidates are created as concepts automatically.
+
+  ontology_enrich_memories  Batch-enrich all (or scoped) memories with NER entity extraction.
+                    For each memory: extracts entities, creates INSTANCE_OF edges to matching concepts.
+                    Optional: scope, min_score, add (create missing concepts), force (re-process),
+                              dry_run (simulate only), limit (max memories, 0=all).
+                    Downloads Xenova/bert-base-NER (~103MB) on first use.
+                    Already-processed memories are skipped unless force=true.`,
 
 		parameters: MemoryParams,
 
@@ -924,6 +935,30 @@ Actions:
 						};
 					}
 
+					case "ontology_enrich_memories": {
+						const args = ["ontology", "enrich-memories", "--json"];
+						if (params.scope) args.push("--scope", params.scope);
+						if (params.min_score != null) args.push("--min-score", String(params.min_score));
+						if (params.add) args.push("--add");
+						if (params.force) args.push("--force");
+						if (params.dry_run) args.push("--dry-run");
+						if (params.limit != null) args.push("--limit", String(params.limit));
+						const { stdout, code } = await execVoidm(args);
+						if (code !== 0) return err("ontology_enrich_memories", parseJson<any>(stdout)?.error ?? stdout);
+						const results = parseJson<any[]>(stdout) ?? [];
+						const processed = results.filter(r => !r.skipped);
+						const skipped = results.filter(r => r.skipped);
+						const totalLinks = processed.reduce((s, r) => s + r.links_created, 0);
+						const totalCreated = processed.flatMap(r => r.concepts_created);
+						let text = `Enriched ${processed.length} memories (${skipped.length} skipped): ${totalLinks} link(s) created`;
+						if (totalCreated.length) text += `, ${totalCreated.length} concept(s) auto-created: ${totalCreated.join(", ")}`;
+						if (params.dry_run) text = `[DRY RUN] ` + text;
+						return {
+							content: [{ type: "text", text }],
+							details: { action: "ontology_enrich_memories", memories: [], message: text } as MemoryDetails,
+						};
+					}
+
 					default:
 						return err("list", `Unknown action: ${(params as any).action}`);
 				}
@@ -1013,6 +1048,10 @@ Actions:
 							: theme.fg("muted", d.message ?? "extracted"),
 						0, 0
 					);
+				}
+				case "ontology_enrich_memories": {
+					const msg = d.message ?? "enriched";
+					return new Text(theme.fg("success", "✓ ") + theme.fg("muted", msg), 0, 0);
 				}
 				default:         return new Text(theme.fg("muted", d.message ?? "done"), 0, 0);
 			}
