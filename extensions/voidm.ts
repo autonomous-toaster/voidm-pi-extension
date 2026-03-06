@@ -61,7 +61,8 @@ interface MemoryDetails {
 	action: "add" | "search" | "list" | "delete" | "link" | "neighbors" | "pagerank" | "cypher"
 		| "concept_add" | "concept_get" | "concept_list" | "concept_delete"
 		| "ontology_link" | "ontology_unlink" | "ontology_edges"
-		| "ontology_hierarchy" | "ontology_instances" | "ontology_extract" | "ontology_enrich_memories";
+		| "ontology_hierarchy" | "ontology_instances" | "ontology_extract" | "ontology_enrich_memories"
+		| "conflicts_list" | "conflicts_resolve";
 	memories: Memory[];
 	concepts?: Concept[];
 	error?: string;
@@ -129,6 +130,7 @@ const MemoryParams = Type.Object({
 		"ontology_link", "ontology_unlink", "ontology_edges",
 		"ontology_hierarchy", "ontology_instances", "ontology_extract",
 		"ontology_enrich_memories",
+		"conflicts_list", "conflicts_resolve",
 	] as const),
 
 	// add
@@ -193,7 +195,8 @@ const MemoryParams = Type.Object({
 	dry_run: Type.Optional(Type.Boolean({ description: "Simulate without writing (for ontology_enrich_memories)" })),
 	limit: Type.Optional(Type.Number({ description: "Max memories to process (for ontology_enrich_memories, 0=all)" })),
 	to_kind: Type.Optional(StringEnum(["concept", "memory"] as const, { description: "Target node kind for ontology_link (default: concept)" })),
-	edge_id: Type.Optional(Type.Number({ description: "Ontology edge integer ID (for ontology_unlink)" })),
+	edge_id: Type.Optional(Type.Number({ description: "Ontology edge integer ID (for ontology_unlink / conflicts_resolve)" })),
+	keep: Type.Optional(Type.String({ description: "ID of the concept to keep when resolving a conflict (for conflicts_resolve)" })),
 });
 
 // ---------------------------------------------------------------------------
@@ -557,7 +560,17 @@ Actions:
                     Optional: scope, min_score, add (create missing concepts), force (re-process),
                               dry_run (simulate only), limit (max memories, 0=all).
                     Downloads Xenova/bert-base-NER (~103MB) on first use.
-                    Already-processed memories are skipped unless force=true.`,
+                    Already-processed memories are skipped unless force=true.
+
+  conflicts_list    List all unresolved CONTRADICTS edges with context.
+                    Optional: scope (filter by concept scope).
+                    Returns edge_id, from/to names and descriptions.
+                    Use conflicts_resolve to close a conflict.
+
+  conflicts_resolve  Resolve a CONTRADICTS conflict.
+                    Required: edge_id (integer), keep (winner concept ID or short prefix).
+                    Removes the CONTRADICTS edge, creates INVALIDATES edge winner→loser,
+                    marks the loser concept description as [SUPERSEDED].`,
 
 		parameters: MemoryParams,
 
@@ -959,6 +972,38 @@ Actions:
 						};
 					}
 
+					case "conflicts_list": {
+						const args = ["conflicts", "list", "--json"];
+						if (params.scope) args.push("--scope", params.scope);
+						const { stdout, code } = await execVoidm(args);
+						if (code !== 0) return err("conflicts_list", parseJson<any>(stdout)?.error ?? stdout);
+						const conflicts = parseJson<any[]>(stdout) ?? [];
+						let text = conflicts.length === 0
+							? "No unresolved conflicts."
+							: `${conflicts.length} conflict(s):\n` + conflicts.map(c =>
+								`  #${c.edge_id}: [${c.from_id?.slice(0,8)}] ${c.from_name ?? "(memory)"} CONTRADICTS [${c.to_id?.slice(0,8)}] ${c.to_name ?? "(memory)"}\n` +
+								`    Resolve: action=conflicts_resolve, edge_id=${c.edge_id}, keep=<id>`
+							).join("\n");
+						return {
+							content: [{ type: "text", text }],
+							details: { action: "conflicts_list", memories: [], message: text } as MemoryDetails,
+						};
+					}
+
+					case "conflicts_resolve": {
+						if (params.edge_id == null) return err("conflicts_resolve", "edge_id is required");
+						if (!params.keep) return err("conflicts_resolve", "keep (winner ID) is required");
+						const args = ["conflicts", "resolve", String(params.edge_id), "--keep", params.keep, "--json"];
+						const { stdout, code } = await execVoidm(args);
+						if (code !== 0) return err("conflicts_resolve", parseJson<any>(stdout)?.error ?? stdout);
+						const result = parseJson<any>(stdout) ?? {};
+						const text = `Conflict #${result.edge_id} resolved. Winner: [${result.winner}], Loser superseded: [${result.loser}].`;
+						return {
+							content: [{ type: "text", text }],
+							details: { action: "conflicts_resolve", memories: [], message: text } as MemoryDetails,
+						};
+					}
+
 					default:
 						return err("list", `Unknown action: ${(params as any).action}`);
 				}
@@ -1053,6 +1098,10 @@ Actions:
 					const msg = d.message ?? "enriched";
 					return new Text(theme.fg("success", "✓ ") + theme.fg("muted", msg), 0, 0);
 				}
+				case "conflicts_list":
+					return new Text(theme.fg("muted", d.message?.split("\n")[0] ?? "conflicts"), 0, 0);
+				case "conflicts_resolve":
+					return new Text(theme.fg("success", "✓ ") + theme.fg("muted", d.message ?? "resolved"), 0, 0);
 				default:         return new Text(theme.fg("muted", d.message ?? "done"), 0, 0);
 			}
 		},
