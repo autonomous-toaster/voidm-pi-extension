@@ -117,6 +117,16 @@ const MemoryParams = Type.Object({
 	),
 	min_score: Type.Optional(Type.Number({ description: "Min score threshold 0-1 for hybrid mode (default 0.3, use 0 to disable)" })),
 	limit: Type.Optional(Type.Number({ description: "Max results (for search/list/pagerank)" })),
+	// neighbor expansion (for search)
+	include_neighbors: Type.Optional(Type.Boolean({ description: "Expand search results with graph neighbors (default false)" })),
+	neighbor_depth: Type.Optional(Type.Number({ description: "Max hops for neighbor expansion, default 1, hard cap 3" })),
+	neighbor_decay: Type.Optional(Type.Number({ description: "Score decay per hop: neighbor_score = parent_score * decay^depth (default 0.7)" })),
+	neighbor_min_score: Type.Optional(Type.Number({ description: "Min score for neighbors to be included (default 0.2)" })),
+	neighbor_limit: Type.Optional(Type.Number({ description: "Max total neighbors to append, default = limit" })),
+	edge_types: Type.Optional(Type.Array(
+		StringEnum(["PART_OF", "SUPPORTS", "DERIVED_FROM", "EXEMPLIFIES", "RELATES_TO", "PRECEDES"] as const),
+		{ description: "Edge types to traverse (default: PART_OF, SUPPORTS, DERIVED_FROM, EXEMPLIFIES)" }
+	)),
 
 	// delete / neighbors / path
 	id: Type.Optional(Type.String({ description: "Memory ID or short prefix (min 4 chars) — for delete/neighbors" })),
@@ -520,6 +530,12 @@ Actions:
 						if (params.scope)     args.push("--scope", params.scope);
 						if (params.limit)     args.push("--limit", String(params.limit));
 						if (params.min_score != null) args.push("--min-score", String(params.min_score));
+						if (params.include_neighbors) args.push("--include-neighbors");
+						if (params.neighbor_depth != null) args.push("--neighbor-depth", String(params.neighbor_depth));
+						if (params.neighbor_decay != null) args.push("--neighbor-decay", String(params.neighbor_decay));
+						if (params.neighbor_min_score != null) args.push("--neighbor-min-score", String(params.neighbor_min_score));
+						if (params.neighbor_limit != null) args.push("--neighbor-limit", String(params.neighbor_limit));
+						if (params.edge_types?.length) args.push("--edge-types", params.edge_types.join(","));
 						args.push("--", params.query);
 
 						const { stdout } = await execVoidm(args);
@@ -537,9 +553,14 @@ Actions:
 						const results: Memory[] = (Array.isArray(parsed) ? parsed : []).map(memoryFromJson);
 						memoryCache = results.length ? results : memoryCache;
 
-						const summary = results.map(m =>
-							`[${m.type}] ${m.id.slice(0, 8)} (imp:${m.importance}) ${m.scopes[0] ? `(${m.scopes[0]}) ` : ""}— ${oneLine(m.content, 80)}`
-						).join("\n");
+						const summary = results.map(m => {
+							const base = `[${m.type}] ${m.id.slice(0, 8)} (imp:${m.importance}) ${m.scopes[0] ? `(${m.scopes[0]}) ` : ""}— ${oneLine(m.content, 80)}`;
+							const raw = parsed && Array.isArray(parsed) ? parsed.find((r: any) => r.id === m.id) : null;
+							if (raw?.source === "graph") {
+								return `  ↳ ${base} [${raw.rel_type} depth=${raw.hop_depth}]`;
+							}
+							return base;
+						}).join("\n");
 
 						return {
 							content: [{ type: "text", text: results.length ? `${results.length} result(s):\n${summary}` : "No results." }],
