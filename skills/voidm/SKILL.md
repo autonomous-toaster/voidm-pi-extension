@@ -132,10 +132,66 @@ Use `AS` aliases when returning multiple node properties to avoid key collisions
 | `EXEMPLIFIES` | yes | A is a concrete instance of abstract B |
 | `INVALIDATES` | yes | A supersedes B (B is outdated) |
 | `RELATES_TO` | undirected | Generic — **requires** `note` |
+| `IS_A` | yes | Concept A is a subclass of concept B (ontology) |
+| `INSTANCE_OF` | yes | Memory or concept is an instance of a class (ontology) |
+| `HAS_PROPERTY` | yes | Concept A has an attribute concept B (ontology) |
 
 ---
 
-## Practical Patterns
+## Ontology (prototype)
+
+A living ontology layer on top of memories. Concepts are first-class citizens distinct from memories, organized in an IS-A class hierarchy with full subsumption.
+
+### Concepts
+
+```
+action=concept_add, name="Microservice", description="Small autonomous deployable unit", scope=software
+action=concept_get, id="b8f90a79"
+action=concept_list, scope=software, limit=20
+action=concept_delete, id="b8f90a79"
+```
+
+### Ontology edges
+
+```
+# Concept IS_A Concept (class hierarchy)
+action=ontology_link, from_id="b8f90a79", rel=IS_A, to_id="319c58af"
+
+# Memory INSTANCE_OF Concept (ground a memory in the ontology)
+action=ontology_link, from_id="<memory-id>", from_kind=memory, rel=INSTANCE_OF, to_id="b8f90a79", to_kind=concept
+
+# Concept HAS_PROPERTY Concept
+action=ontology_link, from_id="b8f90a79", rel=HAS_PROPERTY, to_id="<prop-concept-id>"
+
+# Remove edge
+action=ontology_unlink, edge_id=3
+
+# List edges for a node
+action=ontology_edges, id="b8f90a79"
+```
+
+### Hierarchy & instances
+
+```
+# Show ancestors + descendants via IS_A chain
+action=ontology_hierarchy, id="b8f90a79"
+
+# All instances of a concept including subclasses (full subsumption)
+action=ontology_instances, id="319c58af"
+```
+
+### Ontology workflow
+
+1. Define top-level concepts with `concept_add`
+2. Build hierarchy with `ontology_link` + `IS_A`
+3. Ground memories to concepts with `ontology_link` + `INSTANCE_OF` (`from_kind=memory`)
+4. Query `ontology_instances` to retrieve all grounded knowledge for a class
+5. Query `ontology_hierarchy` to understand where a concept sits in the domain model
+
+### IS_A / INSTANCE_OF rules
+- `IS_A` and `HAS_PROPERTY`: both endpoints must be concepts
+- `INSTANCE_OF`: target must be a concept; source can be memory or concept
+- `from_kind` / `to_kind` default to `concept` — set `memory` explicitly when linking memories
 
 ### Capture a principle after solving a problem
 

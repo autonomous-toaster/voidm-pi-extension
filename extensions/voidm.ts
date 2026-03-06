@@ -34,9 +34,36 @@ interface SuggestedLink {
 	hint: string;
 }
 
+interface Concept {
+	id: string;
+	name: string;
+	description?: string;
+	scope?: string;
+	created_at: string;
+}
+
+interface HierarchyNode {
+	id: string;
+	name: string;
+	description?: string;
+	depth: number;
+	direction: "ancestor" | "descendant";
+}
+
+interface ConceptInstance {
+	instance_id: string;
+	instance_kind: "concept" | "memory";
+	concept_id: string;
+	note?: string;
+}
+
 interface MemoryDetails {
-	action: "add" | "search" | "list" | "delete" | "link" | "neighbors" | "pagerank";
+	action: "add" | "search" | "list" | "delete" | "link" | "neighbors" | "pagerank" | "cypher"
+		| "concept_add" | "concept_get" | "concept_list" | "concept_delete"
+		| "ontology_link" | "ontology_unlink" | "ontology_edges"
+		| "ontology_hierarchy" | "ontology_instances";
 	memories: Memory[];
+	concepts?: Concept[];
 	error?: string;
 	message?: string;
 }
@@ -95,7 +122,13 @@ function memoryFromJson(raw: any): Memory {
 // ---------------------------------------------------------------------------
 
 const MemoryParams = Type.Object({
-	action: StringEnum(["add", "search", "list", "delete", "link", "neighbors", "pagerank", "cypher"] as const),
+	action: StringEnum([
+		"add", "search", "list", "delete", "link", "neighbors", "pagerank", "cypher",
+		// Ontology actions
+		"concept_add", "concept_get", "concept_list", "concept_delete",
+		"ontology_link", "ontology_unlink", "ontology_edges",
+		"ontology_hierarchy", "ontology_instances",
+	] as const),
 
 	// add
 	content: Type.Optional(Type.String({ description: "Memory content (for add)" })),
@@ -146,6 +179,15 @@ const MemoryParams = Type.Object({
 
 	// cypher
 	cypher_query: Type.Optional(Type.String({ description: "Read-only Cypher query (for cypher action). MATCH/WHERE/RETURN/ORDER BY/LIMIT/WITH only. Write clauses are rejected." })),
+
+	// ontology: concept
+	name: Type.Optional(Type.String({ description: "Concept name (for concept_add)" })),
+	description: Type.Optional(Type.String({ description: "Concept description (for concept_add)" })),
+
+	// ontology: link
+	from_kind: Type.Optional(StringEnum(["concept", "memory"] as const, { description: "Source node kind for ontology_link (default: concept)" })),
+	to_kind: Type.Optional(StringEnum(["concept", "memory"] as const, { description: "Target node kind for ontology_link (default: concept)" })),
+	edge_id: Type.Optional(Type.Number({ description: "Ontology edge integer ID (for ontology_unlink)" })),
 });
 
 // ---------------------------------------------------------------------------
@@ -451,7 +493,7 @@ Actions:
 
   delete    Delete a memory by id. Required: id. Accepts full UUID or short prefix (min 4 chars).
 
-  link      Create a graph edge. Required: from_id, rel, to_id. Use note when rel=RELATES_TO.
+  link      Create a graph edge between two memories. Required: from_id, rel, to_id. Use note when rel=RELATES_TO.
             All IDs accept full UUID or short prefix (min 4 chars).
             Rels: SUPPORTS | CONTRADICTS | DERIVED_FROM | PRECEDES | PART_OF | EXEMPLIFIES | INVALIDATES | RELATES_TO
 
@@ -468,7 +510,37 @@ Actions:
               MATCH (a:Memory)-[:SUPPORTS]->(b:Memory) RETURN a.memory_id, b.memory_id LIMIT 10
               MATCH (a)-[:RELATES_TO]-(b) WHERE a.memory_id = '<id>' RETURN b.memory_id
               MATCH (a)-[*1..3]->(b) RETURN a.memory_id, b.memory_id ORDER BY a.memory_id LIMIT 20
-              MATCH (a)-[r]->(b) RETURN a.memory_id, r.rel_type, b.memory_id LIMIT 50`,
+              MATCH (a)-[r]->(b) RETURN a.memory_id, r.rel_type, b.memory_id LIMIT 50
+
+── Ontology (prototype) ────────────────────────────────────────────────────────
+
+  concept_add     Add a first-class concept. Required: name. Optional: description, scope.
+                  Concepts are the ontology's class nodes — distinct from memories.
+                  Example: name="Microservice", description="Small autonomous deployable unit"
+
+  concept_get     Get a concept by ID or short prefix. Required: id.
+
+  concept_list    List concepts. Optional: scope (prefix filter), limit.
+
+  concept_delete  Delete a concept and all its ontology edges. Required: id.
+
+  ontology_link   Create a typed edge in the ontology graph. Required: from_id, rel, to_id.
+                  Optional: from_kind (concept|memory, default concept), to_kind (concept|memory, default concept), note.
+                  Ontology rels: IS_A | INSTANCE_OF | HAS_PROPERTY
+                  IS_A and HAS_PROPERTY require both endpoints to be concepts.
+                  INSTANCE_OF: target must be a concept; source can be memory or concept.
+                  Example: link memory INSTANCE_OF concept → from_id=<mem>, from_kind=memory, rel=INSTANCE_OF, to_id=<concept>
+
+  ontology_unlink Remove an ontology edge by its integer id. Required: edge_id.
+                  Get edge IDs from ontology_edges action.
+
+  ontology_edges  List all ontology edges for a node. Required: id (concept or memory, short prefix ok).
+
+  ontology_hierarchy  Show ancestors and descendants of a concept via IS_A chain. Required: id.
+                      Returns the full class hierarchy above and below the concept.
+
+  ontology_instances  List all instances of a concept, including instances of subclasses (full subsumption).
+                      Required: id. Returns memories and concepts linked via INSTANCE_OF.`,
 
 		parameters: MemoryParams,
 
@@ -690,6 +762,138 @@ Actions:
 						};
 					}
 
+					// ── Ontology actions ──────────────────────────────────────────────────
+
+					case "concept_add": {
+						if (!params.name) return err("concept_add", "name is required");
+						const args = ["ontology", "concept", "add", params.name, "--json"];
+						if (params.description) args.push("--description", params.description);
+						if (params.scope) args.push("--scope", params.scope);
+						const { stdout, code } = await execVoidm(args);
+						if (code !== 0) return err("concept_add", parseJson<any>(stdout)?.error ?? stdout);
+						const concept = parseJson<Concept>(stdout);
+						if (!concept) return err("concept_add", "unexpected response");
+						return {
+							content: [{ type: "text", text: `Concept added: ${concept.name} [${concept.id.slice(0,8)}]` }],
+							details: { action: "concept_add", memories: [], concepts: [concept] } as MemoryDetails,
+						};
+					}
+
+					case "concept_get": {
+						if (!params.id) return err("concept_get", "id is required");
+						const { stdout, code } = await execVoidm(["ontology", "concept", "get", params.id, "--json"]);
+						if (code !== 0) return err("concept_get", parseJson<any>(stdout)?.error ?? stdout);
+						const concept = parseJson<Concept>(stdout);
+						if (!concept) return err("concept_get", "not found");
+						return {
+							content: [{ type: "text", text: `[${concept.id.slice(0,8)}] ${concept.name}${concept.description ? ` — ${concept.description}` : ""}` }],
+							details: { action: "concept_get", memories: [], concepts: [concept] } as MemoryDetails,
+						};
+					}
+
+					case "concept_list": {
+						const args = ["ontology", "concept", "list", "--json"];
+						if (params.scope) args.push("--scope", params.scope);
+						if (params.limit) args.push("--limit", String(params.limit));
+						const { stdout } = await execVoidm(args);
+						const concepts = parseJson<Concept[]>(stdout) ?? [];
+						const summary = concepts.map(c =>
+							`[${c.id.slice(0,8)}] ${c.name}${c.description ? ` — ${oneLine(c.description, 60)}` : ""}`
+						).join("\n");
+						return {
+							content: [{ type: "text", text: concepts.length ? `${concepts.length} concept(s):\n${summary}` : "No concepts yet." }],
+							details: { action: "concept_list", memories: [], concepts } as MemoryDetails,
+						};
+					}
+
+					case "concept_delete": {
+						if (!params.id) return err("concept_delete", "id is required");
+						const { stdout, code } = await execVoidm(["ontology", "concept", "delete", params.id, "--json"]);
+						if (code !== 0) return err("concept_delete", parseJson<any>(stdout)?.error ?? stdout);
+						return {
+							content: [{ type: "text", text: `Concept ${params.id} deleted.` }],
+							details: { action: "concept_delete", memories: [], concepts: [] } as MemoryDetails,
+						};
+					}
+
+					case "ontology_link": {
+						if (!params.from_id) return err("ontology_link", "from_id is required");
+						if (!params.rel)     return err("ontology_link", "rel is required (IS_A | INSTANCE_OF | HAS_PROPERTY)");
+						if (!params.to_id)   return err("ontology_link", "to_id is required");
+						const args = [
+							"ontology", "link", params.from_id,
+							"--from-kind", params.from_kind ?? "concept",
+							params.rel,
+							params.to_id,
+							"--to-kind", params.to_kind ?? "concept",
+							"--json",
+						];
+						if (params.note) args.push("--note", params.note);
+						const { stdout, code } = await execVoidm(args);
+						if (code !== 0) return err("ontology_link", parseJson<any>(stdout)?.error ?? stdout);
+						const edge = parseJson<any>(stdout);
+						return {
+							content: [{ type: "text", text: `Linked: ${params.from_id.slice(0,8)} (${params.from_kind ?? "concept"}) --[${params.rel}]--> ${params.to_id.slice(0,8)} (${params.to_kind ?? "concept"})` }],
+							details: { action: "ontology_link", memories: [], message: "linked" } as MemoryDetails,
+						};
+					}
+
+					case "ontology_unlink": {
+						if (params.edge_id == null) return err("ontology_unlink", "edge_id is required");
+						const { stdout, code } = await execVoidm(["ontology", "unlink", String(params.edge_id), "--json"]);
+						if (code !== 0) return err("ontology_unlink", parseJson<any>(stdout)?.error ?? stdout);
+						return {
+							content: [{ type: "text", text: `Ontology edge ${params.edge_id} removed.` }],
+							details: { action: "ontology_unlink", memories: [], message: "unlinked" } as MemoryDetails,
+						};
+					}
+
+					case "ontology_edges": {
+						if (!params.id) return err("ontology_edges", "id is required");
+						const { stdout, code } = await execVoidm(["ontology", "edges", params.id, "--json"]);
+						if (code !== 0) return err("ontology_edges", parseJson<any>(stdout)?.error ?? stdout);
+						const edges = parseJson<any[]>(stdout) ?? [];
+						const summary = edges.map(e =>
+							`[${e.id}] ${e.from_id.slice(0,8)} (${e.from_type}) --[${e.rel_type}]--> ${e.to_id.slice(0,8)} (${e.to_type})`
+						).join("\n");
+						return {
+							content: [{ type: "text", text: edges.length ? `${edges.length} edge(s):\n${summary}` : "No ontology edges." }],
+							details: { action: "ontology_edges", memories: [], message: `${edges.length} edges` } as MemoryDetails,
+						};
+					}
+
+					case "ontology_hierarchy": {
+						if (!params.id) return err("ontology_hierarchy", "id is required");
+						const { stdout, code } = await execVoidm(["ontology", "hierarchy", params.id, "--json"]);
+						if (code !== 0) return err("ontology_hierarchy", parseJson<any>(stdout)?.error ?? stdout);
+						const nodes = parseJson<HierarchyNode[]>(stdout) ?? [];
+						const ancestors = nodes.filter(n => n.direction === "ancestor");
+						const descendants = nodes.filter(n => n.direction === "descendant");
+						let text = `Hierarchy for concept ${params.id}:\n`;
+						if (ancestors.length) text += `Ancestors:\n` + ancestors.map(n => `  ${"  ".repeat(n.depth - 1)}${n.name} [${n.id.slice(0,8)}]`).join("\n") + "\n";
+						text += `  → (self)\n`;
+						if (descendants.length) text += `Descendants:\n` + descendants.map(n => `  ${"  ".repeat(n.depth - 1)}${n.name} [${n.id.slice(0,8)}]`).join("\n");
+						if (!ancestors.length && !descendants.length) text = `No IS_A connections for concept ${params.id}.`;
+						return {
+							content: [{ type: "text", text }],
+							details: { action: "ontology_hierarchy", memories: [], message: `${nodes.length} hierarchy nodes` } as MemoryDetails,
+						};
+					}
+
+					case "ontology_instances": {
+						if (!params.id) return err("ontology_instances", "id is required");
+						const { stdout, code } = await execVoidm(["ontology", "instances", params.id, "--json"]);
+						if (code !== 0) return err("ontology_instances", parseJson<any>(stdout)?.error ?? stdout);
+						const instances = parseJson<ConceptInstance[]>(stdout) ?? [];
+						const summary = instances.map(i =>
+							`[${i.instance_id.slice(0,8)}] ${i.instance_kind}${i.note ? ` — ${i.note}` : ""}${i.concept_id !== params.id ? ` (via ${i.concept_id.slice(0,8)})` : ""}`
+						).join("\n");
+						return {
+							content: [{ type: "text", text: instances.length ? `${instances.length} instance(s):\n${summary}` : "No instances." }],
+							details: { action: "ontology_instances", memories: [], message: `${instances.length} instances` } as MemoryDetails,
+						};
+					}
+
 					default:
 						return err("list", `Unknown action: ${(params as any).action}`);
 				}
@@ -706,6 +910,7 @@ Actions:
 			if (args.cypher_query) text += " " + theme.fg("accent", oneLine(args.cypher_query, 60));
 			if (args.id)           text += " " + theme.fg("dim", args.id.slice(0, 8));
 			if (args.from_id)      text += " " + theme.fg("dim", `${args.from_id.slice(0,8)} -[${args.rel}]→ ${args.to_id?.slice(0,8)}`);
+			if (args.name)         text += " " + theme.fg("accent", args.name);
 			if (args.type)         text += " " + theme.fg("dim", `[${args.type}]`);
 			if (args.scope)        text += " " + theme.fg("dim", `@${args.scope}`);
 			return new Text(text, 0, 0);
@@ -742,6 +947,34 @@ Actions:
 				case "link":     return new Text(theme.fg("success", "✓ ") + theme.fg("muted", d.message ?? "linked"), 0, 0);
 				case "neighbors":
 				case "pagerank": return new Text(theme.fg("muted", d.message ?? "done"), 0, 0);
+				// Ontology renders
+				case "concept_add": {
+					const c = d.concepts?.[0];
+					return new Text(c
+						? theme.fg("success", "✓ concept ") + theme.fg("accent", c.name) + theme.fg("dim", ` [${c.id.slice(0,8)}]`)
+						: theme.fg("success", "✓ concept added"), 0, 0);
+				}
+				case "concept_get": {
+					const c = d.concepts?.[0];
+					return new Text(c
+						? theme.fg("accent", c.name) + theme.fg("dim", ` [${c.id.slice(0,8)}]${c.description ? " — " + oneLine(c.description, 50) : ""}`)
+						: theme.fg("dim", "concept"), 0, 0);
+				}
+				case "concept_list": {
+					const cs = d.concepts ?? [];
+					if (!cs.length) return new Text(theme.fg("dim", "no concepts"), 0, 0);
+					let t = theme.fg("muted", `${cs.length} concept(s)`);
+					const show = expanded ? cs : cs.slice(0, 5);
+					for (const c of show) t += `\n${theme.fg("accent", c.name)} ${theme.fg("dim", `[${c.id.slice(0,8)}]`)}`;
+					if (!expanded && cs.length > 5) t += `\n${theme.fg("dim", `… ${cs.length - 5} more`)}`;
+					return new Text(t, 0, 0);
+				}
+				case "concept_delete":    return new Text(theme.fg("success", "✓ concept deleted"), 0, 0);
+				case "ontology_link":     return new Text(theme.fg("success", "✓ ") + theme.fg("muted", d.message ?? "ontology edge created"), 0, 0);
+				case "ontology_unlink":   return new Text(theme.fg("success", "✓ ") + theme.fg("muted", "edge removed"), 0, 0);
+				case "ontology_edges":    return new Text(theme.fg("muted", d.message ?? "edges"), 0, 0);
+				case "ontology_hierarchy":return new Text(theme.fg("muted", d.message ?? "hierarchy"), 0, 0);
+				case "ontology_instances":return new Text(theme.fg("muted", d.message ?? "instances"), 0, 0);
 				default:         return new Text(theme.fg("muted", d.message ?? "done"), 0, 0);
 			}
 		},
