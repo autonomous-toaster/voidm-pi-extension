@@ -376,9 +376,24 @@ export default function (pi: ExtensionAPI) {
 	// ---------------------------------------------------------------------------
 	// Auto enrich-memories on session start — silently links memories to concepts
 	// ---------------------------------------------------------------------------
-	pi.on("session_start", async (_e, ctx) => {
+	pi.on("session_start", async (_e, _ctx) => {
 		// Fire-and-forget — don't block session startup, don't show output to agent
-		execVoidm(["ontology", "enrich-memories", "--json"]).catch(() => {});
+		execVoidm(["ontology", "enrich-memories", "--add", "--json"]).catch(() => {});
+	});
+
+	// ---------------------------------------------------------------------------
+	// before_agent_start — inject memory workflow reminder into system prompt
+	// ---------------------------------------------------------------------------
+	pi.on("before_agent_start", async (e, _ctx) => {
+		const promptHint = e.prompt.replace(/\s+/g, " ").trim().slice(0, 120);
+		const reminder = [
+			"",
+			"[Memory workflow]",
+			"BEFORE starting: recall relevant context — memory action=recall query=\"<topic or tool from the task>\"",
+			`Task hint: "${promptHint}"`,
+			"AFTER completing: store new knowledge (decisions, gotchas, patterns) — memory action=remember",
+		].join("\n");
+		return { systemPrompt: e.systemPrompt + "\n\n---" + reminder + "\n---" };
 	});
 
 	// ---------------------------------------------------------------------------
