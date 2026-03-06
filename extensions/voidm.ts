@@ -640,8 +640,16 @@ Actions:
 						if (params.edge_types?.length) args.push("--edge-types", params.edge_types.join(","));
 						args.push("--", params.query);
 
-						const { stdout } = await execVoidm(args);
-						const parsed = parseJson<any>(stdout);
+						// Also search concepts in parallel
+						const conceptArgs = ["ontology", "concept", "list", "--json"];
+						if (params.scope) conceptArgs.push("--scope", params.scope);
+
+						const [memResult, conceptResult] = await Promise.all([
+							execVoidm(args),
+							execVoidm(conceptArgs),
+						]);
+
+						const parsed = parseJson<any>(memResult.stdout);
 
 						// Empty with threshold info
 						if (parsed && !Array.isArray(parsed) && parsed.results !== undefined) {
@@ -655,18 +663,40 @@ Actions:
 						const results: Memory[] = (Array.isArray(parsed) ? parsed : []).map(memoryFromJson);
 						memoryCache = results.length ? results : memoryCache;
 
-						const summary = results.map(m => {
-							const base = `[${m.type}] ${m.id.slice(0, 8)} (imp:${m.importance}) ${m.scopes[0] ? `(${m.scopes[0]}) ` : ""}— ${oneLine(m.content, 80)}`;
-							const raw = parsed && Array.isArray(parsed) ? parsed.find((r: any) => r.id === m.id) : null;
-							if (raw?.source === "graph") {
-								return `  ↳ ${base} [${raw.rel_type} depth=${raw.hop_depth}]`;
-							}
-							return base;
-						}).join("\n");
+						// Filter concepts by name/description match (simple substring, FTS is server-side)
+						const allConcepts: any[] = parseJson<any[]>(conceptResult.stdout) ?? [];
+						const queryLower = params.query.toLowerCase();
+						const matchedConcepts = allConcepts.filter(c =>
+							c.name?.toLowerCase().includes(queryLower) ||
+							c.description?.toLowerCase().includes(queryLower)
+						);
+
+						// Build output — full content, no truncation (LLM needs it)
+						let text = "";
+						if (results.length) {
+							text += `${results.length} memory result(s):\n`;
+							text += results.map(m => {
+								const raw = Array.isArray(parsed) ? parsed.find((r: any) => r.id === m.id) : null;
+								const header = `[${m.type}] [${m.id.slice(0, 8)}] (imp:${m.importance})${m.scopes[0] ? ` (${m.scopes[0]})` : ""}`;
+								const graphNote = raw?.source === "graph" ? ` [via ${raw.rel_type} depth=${raw.hop_depth}]` : "";
+								return `${header}${graphNote}\n${m.content}`;
+							}).join("\n\n");
+						}
+						if (matchedConcepts.length) {
+							if (text) text += "\n\n";
+							text += `${matchedConcepts.length} concept(s) matching "${params.query}":\n`;
+							text += matchedConcepts.map(c => {
+								let s = `[concept] [${c.id.slice(0,8)}] ${c.name}`;
+								if (c.description) s += ` — ${c.description}`;
+								if (c.scope) s += ` (scope: ${c.scope})`;
+								return s;
+							}).join("\n");
+						}
+						if (!text) text = "No results.";
 
 						return {
-							content: [{ type: "text", text: results.length ? `${results.length} result(s):\n${summary}` : "No results." }],
-							details: { action: "search", memories: results, message: `${results.length} results` } as MemoryDetails,
+							content: [{ type: "text", text }],
+							details: { action: "search", memories: results, message: `${results.length} memory results, ${matchedConcepts.length} concept(s)` } as MemoryDetails,
 						};
 					}
 
@@ -813,10 +843,24 @@ Actions:
 						if (!params.id) return err("concept_get", "id is required");
 						const { stdout, code } = await execVoidm(["ontology", "concept", "get", params.id, "--json"]);
 						if (code !== 0) return err("concept_get", parseJson<any>(stdout)?.error ?? stdout);
-						const concept = parseJson<Concept>(stdout);
+						const concept = parseJson<any>(stdout);
 						if (!concept) return err("concept_get", "not found");
+						let text = `[${concept.id.slice(0,8)}] ${concept.name}`;
+						if (concept.description) text += `\n  ${concept.description}`;
+						if (concept.scope) text += `\n  scope: ${concept.scope}`;
+						if (concept.superclasses?.length) text += `\n  IS_A: ${concept.superclasses.map((c: any) => c.name).join(", ")}`;
+						if (concept.subclasses?.length) text += `\n  Subclasses: ${concept.subclasses.map((c: any) => c.name).join(", ")}`;
+						if (concept.instances?.length) {
+							text += `\n  Instances (${concept.instances.length}):`;
+							for (const inst of concept.instances.slice(0, 5)) {
+								text += `\n    [${inst.memory_id.slice(0,8)}] ${inst.preview}`;
+							}
+							if (concept.instances.length > 5) text += `\n    … ${concept.instances.length - 5} more`;
+						} else {
+							text += `\n  Instances: none`;
+						}
 						return {
-							content: [{ type: "text", text: `[${concept.id.slice(0,8)}] ${concept.name}${concept.description ? ` — ${concept.description}` : ""}` }],
+							content: [{ type: "text", text }],
 							details: { action: "concept_get", memories: [], concepts: [concept] } as MemoryDetails,
 						};
 					}
