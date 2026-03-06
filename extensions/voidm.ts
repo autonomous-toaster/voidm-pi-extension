@@ -1,10 +1,10 @@
 /**
  * voidm Extension — Persistent memory for AI agents
- * Replaces mmry. Backed by voidm (local-first, hybrid search, graph layer).
+ * Backed by voidm (local-first, hybrid search, graph + ontology layer).
  */
 
 import { StringEnum } from "@mariozechner/pi-ai";
-import type { ExtensionAPI, ExtensionContext, Theme } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, Theme, ThemeColor } from "@mariozechner/pi-coding-agent";
 import { matchesKey, Text, truncateToWidth } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { execFile } from "node:child_process";
@@ -26,16 +26,8 @@ interface Memory {
 	created_at: string;
 }
 
-interface SuggestedLink {
-	id: string;
-	score: number;
-	memory_type: string;
-	content: string;
-	hint: string;
-}
-
 interface MemoryDetails {
-	action: "add" | "search" | "list" | "delete" | "link" | "neighbors" | "pagerank";
+	action: "remember" | "recall" | "relate" | "concept_add" | "concept_get" | "link_to_concept";
 	memories: Memory[];
 	error?: string;
 	message?: string;
@@ -46,7 +38,6 @@ interface MemoryDetails {
 // ---------------------------------------------------------------------------
 
 const VOIDM = (() => {
-	// $VOIDM_BIN → ~/.local/bin/voidm → voidm (PATH fallback)
 	if (process.env.VOIDM_BIN) return process.env.VOIDM_BIN;
 	const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
 	const local = `${home}/.local/bin/voidm`;
@@ -56,26 +47,15 @@ const VOIDM = (() => {
 
 async function execVoidm(args: string[]): Promise<{ stdout: string; stderr: string; code: number }> {
 	try {
-		const { stdout, stderr } = await execFileAsync(VOIDM, args, {
-			maxBuffer: 10 * 1024 * 1024,
-		});
+		const { stdout, stderr } = await execFileAsync(VOIDM, args, { maxBuffer: 10 * 1024 * 1024 });
 		return { stdout, stderr, code: 0 };
 	} catch (error: any) {
-		// execFile rejects on non-zero exit — extract stdout/stderr from error
-		return {
-			stdout: error.stdout ?? "",
-			stderr: error.stderr ?? "",
-			code: error.code ?? 1,
-		};
+		return { stdout: error.stdout ?? "", stderr: error.stderr ?? "", code: error.code ?? 1 };
 	}
 }
 
 function parseJson<T>(raw: string): T | null {
-	try {
-		return JSON.parse(raw) as T;
-	} catch {
-		return null;
-	}
+	try { return JSON.parse(raw) as T; } catch { return null; }
 }
 
 function memoryFromJson(raw: any): Memory {
@@ -90,67 +70,92 @@ function memoryFromJson(raw: any): Memory {
 	};
 }
 
+function err(action: string, msg: string) {
+	return {
+		content: [{ type: "text" as const, text: `Error [${action}]: ${msg}` }],
+		details: { action: action as any, memories: [], error: msg } as MemoryDetails,
+	};
+}
+
+function oneLine(s: string, max: number): string {
+	const flat = s.replace(/\n+/g, " ").replace(/\s+/g, " ").trim();
+	return flat.length > max ? flat.slice(0, max - 1) + "…" : flat;
+}
+
 // ---------------------------------------------------------------------------
-// Tool parameter schema
+// Tool parameter schema — intentionally minimal
 // ---------------------------------------------------------------------------
 
 const MemoryParams = Type.Object({
-	action: StringEnum(["add", "search", "list", "delete", "link", "neighbors", "pagerank", "cypher"] as const),
+	action: StringEnum([
+		"remember",       // store a memory
+		"recall",         // search memories + concepts
+		"relate",         // link two memories
+		"concept_add",    // define a concept (ontology class node)
+		"concept_get",    // inspect a concept + its linked memories
+		"link_to_concept",// attach a memory to a concept
+	] as const),
 
-	// add
-	content: Type.Optional(Type.String({ description: "Memory content (for add)" })),
-	type: Type.Optional(
-		StringEnum(["episodic", "semantic", "procedural", "conceptual", "contextual"] as const, {
-			description: "Memory type (required for add)",
-		}),
-	),
-	scope: Type.Optional(Type.String({ description: "Scope prefix, e.g. work/acme (for add/search/list)" })),
-	tags: Type.Optional(Type.String({ description: "Comma-separated tags (for add)" })),
-	importance: Type.Optional(Type.Number({ description: "Importance 1-10 (for add, default 5)" })),
-
-	// search
-	query: Type.Optional(Type.String({ description: "Search query (for search)" })),
-	mode: Type.Optional(
-		StringEnum(["hybrid", "semantic", "bm25", "fuzzy", "keyword"] as const, {
-			description: "Search mode (for search, default hybrid)",
-		}),
-	),
-	min_score: Type.Optional(Type.Number({ description: "Min score threshold 0-1 for hybrid mode (default 0.3, use 0 to disable)" })),
-	limit: Type.Optional(Type.Number({ description: "Max results (for search/list/pagerank)" })),
-	// neighbor expansion (for search)
-	include_neighbors: Type.Optional(Type.Boolean({ description: "Expand search results with graph neighbors (default false)" })),
-	neighbor_depth: Type.Optional(Type.Number({ description: "Max hops for neighbor expansion, default 1, hard cap 3" })),
-	neighbor_decay: Type.Optional(Type.Number({ description: "Score decay per hop: neighbor_score = parent_score * decay^depth (default 0.7)" })),
-	neighbor_min_score: Type.Optional(Type.Number({ description: "Min score for neighbors to be included (default 0.2)" })),
-	neighbor_limit: Type.Optional(Type.Number({ description: "Max total neighbors to append, default = limit" })),
-	edge_types: Type.Optional(Type.Array(
-		StringEnum(["PART_OF", "SUPPORTS", "DERIVED_FROM", "EXEMPLIFIES", "RELATES_TO", "PRECEDES"] as const),
-		{ description: "Edge types to traverse (default: PART_OF, SUPPORTS, DERIVED_FROM, EXEMPLIFIES)" }
+	// remember
+	content:     Type.Optional(Type.String({ description: "Memory content (required for remember)" })),
+	type:        Type.Optional(StringEnum(
+		["episodic", "semantic", "procedural", "conceptual", "contextual"] as const,
+		{ description: "Memory type (required for remember)" }
 	)),
+	scope:       Type.Optional(Type.String({ description: "Scope prefix, e.g. project/auth (for remember, recall, concept_add)" })),
+	tags:        Type.Optional(Type.String({ description: "Comma-separated tags (for remember)" })),
+	importance:  Type.Optional(Type.Number({ description: "Importance 1-10 (for remember, default 5)" })),
 
-	// delete / neighbors / path
-	id: Type.Optional(Type.String({ description: "Memory ID or short prefix (min 4 chars) — for delete/neighbors" })),
+	// recall
+	query:       Type.Optional(Type.String({ description: "Search query (required for recall)" })),
+	limit:       Type.Optional(Type.Number({ description: "Max results (for recall, default 10)" })),
 
-	// link / path
-	from_id: Type.Optional(Type.String({ description: "Source memory ID or short prefix (for link)" })),
-	rel: Type.Optional(
-		StringEnum(["SUPPORTS", "CONTRADICTS", "DERIVED_FROM", "PRECEDES", "PART_OF", "EXEMPLIFIES", "INVALIDATES", "RELATES_TO"] as const, {
-			description: "Edge type (for link)",
-		}),
-	),
-	to_id: Type.Optional(Type.String({ description: "Target memory ID or short prefix (for link)" })),
-	note: Type.Optional(Type.String({ description: "Required note when rel=RELATES_TO" })),
+	// relate
+	from_id:     Type.Optional(Type.String({ description: "Source memory ID or short prefix (for relate)" })),
+	rel:         Type.Optional(StringEnum(
+		["SUPPORTS", "CONTRADICTS", "DERIVED_FROM", "PRECEDES", "PART_OF", "EXEMPLIFIES", "RELATES_TO"] as const,
+		{ description: "Relationship type (for relate)" }
+	)),
+	to_id:       Type.Optional(Type.String({ description: "Target memory ID or short prefix (for relate)" })),
+	note:        Type.Optional(Type.String({ description: "Optional note, required when rel=RELATES_TO" })),
 
-	// neighbors
-	depth: Type.Optional(Type.Number({ description: "Traversal depth for neighbors (default 1)" })),
-
-	// cypher
-	cypher_query: Type.Optional(Type.String({ description: "Read-only Cypher query (for cypher action). MATCH/WHERE/RETURN/ORDER BY/LIMIT/WITH only. Write clauses are rejected." })),
+	// concept_add / concept_get / link_to_concept
+	id:          Type.Optional(Type.String({ description: "Concept ID or short prefix (for concept_get, link_to_concept)" })),
+	name:        Type.Optional(Type.String({ description: "Concept name (for concept_add)" })),
+	description: Type.Optional(Type.String({ description: "Concept description (for concept_add)" })),
+	memory_id:   Type.Optional(Type.String({ description: "Memory ID or short prefix to link (for link_to_concept)" })),
 });
 
 // ---------------------------------------------------------------------------
-// TUI: Memory browser
+// MemoryBrowser TUI
 // ---------------------------------------------------------------------------
+
+const typeColors: Record<string, ThemeColor> = {
+	episodic: "muted", semantic: "accent", procedural: "success",
+	conceptual: "warning", contextual: "muted",
+};
+
+function trunc(s: string, w: number) { return truncateToWidth(s, w); }
+
+function wordWrap(text: string, maxWidth: number): string[] {
+	const out: string[] = [];
+	for (const para of text.split("\n")) {
+		if (para.length <= maxWidth) { out.push(para); continue; }
+		let cur = "";
+		for (const word of para.split(" ")) {
+			if (cur && (cur + " " + word).length > maxWidth) { out.push(cur); cur = word; }
+			else cur = cur ? cur + " " + word : word;
+		}
+		if (cur) out.push(cur);
+	}
+	return out;
+}
+
+function countTypes(ms: Memory[]): string {
+	const c: Record<string, number> = {};
+	for (const m of ms) c[m.type] = (c[m.type] ?? 0) + 1;
+	return Object.entries(c).map(([k, v]) => `${v} ${k}`).join(", ");
+}
 
 class MemoryBrowser {
 	private memories: Memory[];
@@ -162,12 +167,10 @@ class MemoryBrowser {
 	private selectedIndex = 0;
 	private currentPage = 0;
 	private pageSize = 6;
-
 	private mode: "list" | "search-input" | "search-results" | "detail" = "list";
 	private searchQuery = "";
 	private deleteConfirm = false;
 	private deleteTimer?: ReturnType<typeof setTimeout>;
-
 	private dirty = true;
 	private cachedWidth?: number;
 	private cachedLines?: string[];
@@ -181,9 +184,6 @@ class MemoryBrowser {
 	}
 
 	async handleInput(data: string): Promise<void> {
-		const th = this.theme;
-
-		// ESC / Ctrl+C: back or close
 		if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) {
 			if (this.deleteConfirm) { this.deleteConfirm = false; clearTimeout(this.deleteTimer); this.invalidate(); return; }
 			if (this.mode === "detail") { this.mode = "list"; this.invalidate(); return; }
@@ -191,16 +191,12 @@ class MemoryBrowser {
 				this.mode = "list"; this.searchQuery = ""; this.filtered = this.memories;
 				this.selectedIndex = 0; this.currentPage = 0; this.invalidate(); return;
 			}
-			this.onClose();
-			return;
+			this.onClose(); return;
 		}
-
 		if (this.mode === "search-input") {
 			if (matchesKey(data, "enter")) {
-				await this.runSearch();
-				this.mode = "search-results";
-				this.selectedIndex = 0; this.currentPage = 0;
-				this.invalidate();
+				await this.runSearch(); this.mode = "search-results";
+				this.selectedIndex = 0; this.currentPage = 0; this.invalidate();
 			} else if (matchesKey(data, "backspace")) {
 				this.searchQuery = this.searchQuery.slice(0, -1); this.invalidate();
 			} else if (data.length === 1) {
@@ -208,7 +204,6 @@ class MemoryBrowser {
 			}
 			return;
 		}
-
 		if (this.mode === "detail") {
 			if (matchesKey(data, "d")) {
 				this.deleteConfirm = true;
@@ -220,11 +215,8 @@ class MemoryBrowser {
 			}
 			return;
 		}
-
-		// list / search-results navigation
 		const list = this.filtered;
 		const totalPages = Math.ceil(list.length / this.pageSize);
-
 		if (matchesKey(data, "down") || matchesKey(data, "j")) {
 			const pageLen = Math.min(this.pageSize, list.length - this.currentPage * this.pageSize);
 			if (this.selectedIndex < pageLen - 1) this.selectedIndex++;
@@ -234,13 +226,13 @@ class MemoryBrowser {
 			if (this.selectedIndex > 0) this.selectedIndex--;
 			else if (this.currentPage > 0) { this.currentPage--; this.selectedIndex = this.pageSize - 1; }
 			this.invalidate();
-		} else if (matchesKey(data, "pagedown") || matchesKey(data, "ctrl+d")) {
+		} else if (matchesKey(data, "pageDown") || matchesKey(data, "ctrl+d")) {
 			this.currentPage = Math.min(this.currentPage + 1, totalPages - 1); this.selectedIndex = 0; this.invalidate();
-		} else if (matchesKey(data, "pageup") || matchesKey(data, "ctrl+u")) {
+		} else if (matchesKey(data, "pageUp") || matchesKey(data, "ctrl+u")) {
 			this.currentPage = Math.max(this.currentPage - 1, 0); this.selectedIndex = 0; this.invalidate();
 		} else if (matchesKey(data, "g")) {
 			this.currentPage = 0; this.selectedIndex = 0; this.invalidate();
-		} else if (matchesKey(data, "G")) {
+		} else if (data === "G") {
 			this.currentPage = Math.max(totalPages - 1, 0);
 			const lastLen = list.length - this.currentPage * this.pageSize;
 			this.selectedIndex = Math.max(Math.min(lastLen, this.pageSize) - 1, 0);
@@ -284,17 +276,14 @@ class MemoryBrowser {
 
 	render(width: number): string[] {
 		if (!this.dirty && this.cachedWidth === width) return this.cachedLines!;
-
 		const th = this.theme;
 		const lines: string[] = [""];
-
 		if (this.mode === "search-input") {
 			lines.push(trunc(th.fg("borderMuted", "───") + th.fg("accent", " Search ") + th.fg("borderMuted", "─".repeat(Math.max(0, width - 11))), width));
 			lines.push("");
 			lines.push(trunc(`  ${th.fg("muted", "Query: ")}${th.fg("text", this.searchQuery)}${th.fg("dim", "_")}`, width));
 			lines.push("");
 			lines.push(trunc(th.fg("dim", "  Enter to search · Esc to cancel"), width));
-
 		} else if (this.mode === "detail") {
 			const mem = this.getSelected();
 			if (!mem) {
@@ -318,13 +307,10 @@ class MemoryBrowser {
 				lines.push("");
 				lines.push(trunc(this.deleteConfirm ? th.fg("error", "  Delete? Press y to confirm") : th.fg("dim", "  d: delete · Esc: back"), width));
 			}
-
 		} else {
-			// list / search-results
 			const label = this.mode === "search-results" ? ` Search: "${this.searchQuery}" ` : " Memories ";
 			lines.push(trunc(th.fg("borderMuted", "───") + th.fg("accent", label) + th.fg("borderMuted", "─".repeat(Math.max(0, width - label.length - 3))), width));
 			lines.push("");
-
 			if (this.filtered.length === 0) {
 				lines.push(trunc(`  ${th.fg("dim", "No memories.")}`, width));
 			} else {
@@ -334,7 +320,6 @@ class MemoryBrowser {
 				lines.push(trunc(`  ${th.fg("muted", `${this.filtered.length} total · ${counts}`)}`, width));
 				if (totalPages > 1) lines[lines.length - 1] += th.fg("dim", `  p${this.currentPage + 1}/${totalPages}`);
 				lines.push("");
-
 				for (let i = 0; i < pageMemories.length; i++) {
 					const mem = pageMemories[i];
 					const selected = i === this.selectedIndex;
@@ -347,7 +332,6 @@ class MemoryBrowser {
 					lines.push(trunc(`${prefix}${typeLabel} ${imp}${scope} ${th.fg(selected ? "text" : "muted", preview)}`, width));
 				}
 			}
-
 			lines.push("");
 			lines.push(trunc(
 				this.deleteConfirm
@@ -356,7 +340,6 @@ class MemoryBrowser {
 				width,
 			));
 		}
-
 		lines.push("");
 		this.dirty = false;
 		this.cachedWidth = width;
@@ -365,45 +348,6 @@ class MemoryBrowser {
 	}
 
 	invalidate() { this.dirty = true; this.cachedWidth = undefined; }
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-const typeColors: Record<string, string> = {
-	episodic: "muted",
-	semantic: "accent",
-	procedural: "success",
-	conceptual: "warning",
-	contextual: "info",
-};
-
-function trunc(s: string, w: number) { return truncateToWidth(s, w); }
-
-function oneLine(s: string, max: number): string {
-	const flat = s.replace(/\n+/g, " ").replace(/\s+/g, " ").trim();
-	return flat.length > max ? flat.slice(0, max - 1) + "…" : flat;
-}
-
-function wordWrap(text: string, maxWidth: number): string[] {
-	const out: string[] = [];
-	for (const para of text.split("\n")) {
-		if (para.length <= maxWidth) { out.push(para); continue; }
-		let cur = "";
-		for (const word of para.split(" ")) {
-			if (cur && (cur + " " + word).length > maxWidth) { out.push(cur); cur = word; }
-			else cur = cur ? cur + " " + word : word;
-		}
-		if (cur) out.push(cur);
-	}
-	return out;
-}
-
-function countTypes(ms: Memory[]): string {
-	const c: Record<string, number> = {};
-	for (const m of ms) c[m.type] = (c[m.type] ?? 0) + 1;
-	return Object.entries(c).map(([k, v]) => `${v} ${k}`).join(", ");
 }
 
 // ---------------------------------------------------------------------------
@@ -429,46 +373,53 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_fork",   async (_e, ctx) => reconstructCache(ctx));
 	pi.on("session_tree",   async (_e, ctx) => reconstructCache(ctx));
 
-	// -------------------------------------------------------------------------
+	// ---------------------------------------------------------------------------
+	// Auto enrich-memories on session start — silently links memories to concepts
+	// ---------------------------------------------------------------------------
+	pi.on("session_start", async (_e, ctx) => {
+		// Fire-and-forget — don't block session startup, don't show output to agent
+		execVoidm(["ontology", "enrich-memories", "--json"]).catch(() => {});
+	});
+
+	// ---------------------------------------------------------------------------
 	// memory tool
-	// -------------------------------------------------------------------------
+	// ---------------------------------------------------------------------------
 	pi.registerTool({
 		name: "memory",
 		label: "Memory",
-		description: `Manage persistent memories across sessions using voidm.
+		description: `Persistent memory across sessions. Store facts, recall context, define concepts.
 
 Actions:
-  add       Store a new memory. Required: content, type. Optional: scope, tags, importance (1-10).
-            Types: episodic | semantic | procedural | conceptual | contextual
-            Response includes suggested_links (≥0.7 similarity) and duplicate_warning (≥0.95).
-            After adding: check suggested_links and call action=link for relevant ones.
+  remember   Store a new memory.
+             Required: content, type.
+             Optional: scope (e.g. "project/auth"), tags (comma-separated), importance (1-10, default 5).
+             Types: episodic | semantic | procedural | conceptual | contextual
+             Returns: memory id + any suggested links to existing related memories.
 
-  search    Hybrid search (vector+BM25+fuzzy). Required: query. Optional: mode, scope, min_score, limit.
-            Modes: hybrid (default, filtered at min_score=0.3), semantic, bm25, fuzzy, keyword.
-            Use min_score=0 to disable threshold. Empty results include best_score for retry guidance.
+  recall     Search memories and concepts.
+             Required: query.
+             Optional: scope (filter by scope prefix), limit (default 10).
+             Returns: full content of matching memories + any matching ontology concepts.
+             If no results, suggests a lower threshold automatically.
 
-  list      List memories newest-first. Optional: scope, type, limit.
+  relate     Link two memories with a typed relationship.
+             Required: from_id, rel, to_id. All IDs accept short prefix (min 4 chars).
+             Optional: note (required when rel=RELATES_TO).
+             Rels: SUPPORTS | CONTRADICTS | DERIVED_FROM | PRECEDES | PART_OF | EXEMPLIFIES | RELATES_TO
 
-  delete    Delete a memory by id. Required: id. Accepts full UUID or short prefix (min 4 chars).
+── Ontology ────────────────────────────────────────────────────────────────────
 
-  link      Create a graph edge. Required: from_id, rel, to_id. Use note when rel=RELATES_TO.
-            All IDs accept full UUID or short prefix (min 4 chars).
-            Rels: SUPPORTS | CONTRADICTS | DERIVED_FROM | PRECEDES | PART_OF | EXEMPLIFIES | INVALIDATES | RELATES_TO
+  concept_add      Define a concept (class/category node).
+                   Required: name. Optional: description, scope.
+                   Example: name="AuthService", description="Handles JWT + OAuth2"
 
-  neighbors Get N-hop graph neighbors of a memory. Required: id (full or short prefix). Optional: depth (default 1).
+  concept_get      Get a concept by ID or short prefix.
+                   Required: id.
+                   Returns: name, description, IS_A parents, subclasses, and linked memory instances.
 
-  pagerank  Rank memories by graph centrality. Optional: limit (default 10).
-
-  cypher    Execute a read-only Cypher query against the memory graph. Required: cypher_query.
-            Supported clauses: MATCH, WHERE, RETURN, ORDER BY, LIMIT, WITH.
-            Write operations (CREATE, MERGE, SET, DELETE, REMOVE, DROP) are rejected.
-            Node properties: memory_id, type, importance, created_at.
-            Edge properties: rel_type, note.
-            Examples:
-              MATCH (a:Memory)-[:SUPPORTS]->(b:Memory) RETURN a.memory_id, b.memory_id LIMIT 10
-              MATCH (a)-[:RELATES_TO]-(b) WHERE a.memory_id = '<id>' RETURN b.memory_id
-              MATCH (a)-[*1..3]->(b) RETURN a.memory_id, b.memory_id ORDER BY a.memory_id LIMIT 20
-              MATCH (a)-[r]->(b) RETURN a.memory_id, r.rel_type, b.memory_id LIMIT 50`,
+  link_to_concept  Attach a memory to a concept via INSTANCE_OF.
+                   Required: memory_id, id (concept id or short prefix).
+                   Makes the memory a concrete instance of that concept class.`,
 
 		parameters: MemoryParams,
 
@@ -476,280 +427,254 @@ Actions:
 			try {
 				switch (params.action) {
 
-					// ---- add ----
-					case "add": {
-						if (!params.content) return err("add", "content is required");
-						if (!params.type) return err("add", "type is required (episodic|semantic|procedural|conceptual|contextual)");
+					// ── remember ──────────────────────────────────────────────────────────
+					case "remember": {
+						if (!params.content) return err("remember", "content is required");
+						if (!params.type)    return err("remember", "type is required");
 
-						const args = [
-							"add",
-							"--type", params.type,
-							"--importance", String(params.importance ?? 5),
-							"--json",
-						];
-						if (params.scope)  args.push("--scope", params.scope);
-						if (params.tags)   args.push("--tags", params.tags);
+						const args = ["add", "--type", params.type, "--importance", String(params.importance ?? 5), "--json"];
+						if (params.scope) args.push("--scope", params.scope);
+						if (params.tags)  args.push("--tags", params.tags);
 						args.push("--", params.content);
 
 						const { stdout, code } = await execVoidm(args);
-						if (code !== 0) {
-							const e = parseJson<any>(stdout);
-							return err("add", e?.error ?? stdout);
-						}
+						if (code !== 0) return err("remember", parseJson<any>(stdout)?.error ?? stdout);
 						const resp = parseJson<any>(stdout);
-						if (!resp?.id) return err("add", "unexpected response from voidm");
+						if (!resp?.id) return err("remember", "unexpected response");
 
 						const mem = memoryFromJson(resp);
 						memoryCache = [mem, ...memoryCache.filter(m => m.id !== mem.id)];
 
-						// Build human-readable summary of suggested links
-						const links: SuggestedLink[] = resp.suggested_links ?? [];
+						let msg = `Stored [${mem.id.slice(0, 8)}] (${mem.type}${params.scope ? `, ${params.scope}` : ""})`;
 						const dup = resp.duplicate_warning;
-
-						let msg = `Added memory ${mem.id} (${mem.type})`;
-						if (dup) msg += `\n⚠ Duplicate warning (score ${dup.score.toFixed(2)}): "${oneLine(dup.content, 80)}" [${dup.id}]`;
+						if (dup) msg += `\n⚠ Similar memory exists [${dup.id.slice(0, 8)}] (score ${dup.score.toFixed(2)}): ${oneLine(dup.content, 80)}`;
+						const links: any[] = resp.suggested_links ?? [];
 						if (links.length) {
-							msg += `\nSuggested links (call action=link to connect):`;
-							for (const l of links) {
-								msg += `\n  ${l.id} score=${l.score.toFixed(2)} — ${l.hint} — "${oneLine(l.content, 60)}"`;
+							msg += `\nRelated memories (use relate to connect):`;
+							for (const l of links.slice(0, 3)) {
+								msg += `\n  [${l.id.slice(0, 8)}] ${l.hint} — ${oneLine(l.content, 70)}`;
 							}
 						}
 
 						return {
 							content: [{ type: "text", text: msg }],
-							details: { action: "add", memories: [...memoryCache], message: msg } as MemoryDetails,
+							details: { action: "remember", memories: [...memoryCache], message: msg } as MemoryDetails,
 						};
 					}
 
-					// ---- search ----
-					case "search": {
-						if (!params.query) return err("search", "query is required");
+					// ── recall ────────────────────────────────────────────────────────────
+					case "recall": {
+						if (!params.query) return err("recall", "query is required");
 
 						const args = ["search", "--json"];
-						if (params.mode)      args.push("--mode", params.mode);
-						if (params.scope)     args.push("--scope", params.scope);
-						if (params.limit)     args.push("--limit", String(params.limit));
-						if (params.min_score != null) args.push("--min-score", String(params.min_score));
-						if (params.include_neighbors) args.push("--include-neighbors");
-						if (params.neighbor_depth != null) args.push("--neighbor-depth", String(params.neighbor_depth));
-						if (params.neighbor_decay != null) args.push("--neighbor-decay", String(params.neighbor_decay));
-						if (params.neighbor_min_score != null) args.push("--neighbor-min-score", String(params.neighbor_min_score));
-						if (params.neighbor_limit != null) args.push("--neighbor-limit", String(params.neighbor_limit));
-						if (params.edge_types?.length) args.push("--edge-types", params.edge_types.join(","));
+						if (params.scope) args.push("--scope", params.scope);
+						if (params.limit) args.push("--limit", String(params.limit));
 						args.push("--", params.query);
 
-						const { stdout } = await execVoidm(args);
-						const parsed = parseJson<any>(stdout);
+						const conceptArgs = ["ontology", "concept", "list", "--json"];
+						if (params.scope) conceptArgs.push("--scope", params.scope);
 
-						// Empty with threshold info
-						if (parsed && !Array.isArray(parsed) && parsed.results !== undefined) {
-							const msg = parsed.hint ?? `No results above threshold ${parsed.threshold}. Best score: ${parsed.best_score}`;
+						const [memResult, conceptResult] = await Promise.all([
+							execVoidm(args),
+							execVoidm(conceptArgs),
+						]);
+
+						const parsed = parseJson<any>(memResult.stdout);
+
+						// Empty result with threshold info
+						if (parsed && !Array.isArray(parsed) && "results" in parsed) {
+							const hint = parsed.hint ?? `No results above threshold. Best score: ${parsed.best_score}`;
 							return {
-								content: [{ type: "text", text: msg }],
-								details: { action: "search", memories: [], message: msg } as MemoryDetails,
+								content: [{ type: "text", text: hint }],
+								details: { action: "recall", memories: [], message: hint } as MemoryDetails,
 							};
 						}
 
-						const results: Memory[] = (Array.isArray(parsed) ? parsed : []).map(memoryFromJson);
-						memoryCache = results.length ? results : memoryCache;
+						const memories: Memory[] = (Array.isArray(parsed) ? parsed : []).map(memoryFromJson);
+						memoryCache = memories.length ? memories : memoryCache;
 
-						const summary = results.map(m => {
-							const base = `[${m.type}] ${m.id.slice(0, 8)} (imp:${m.importance}) ${m.scopes[0] ? `(${m.scopes[0]}) ` : ""}— ${oneLine(m.content, 80)}`;
-							const raw = parsed && Array.isArray(parsed) ? parsed.find((r: any) => r.id === m.id) : null;
-							if (raw?.source === "graph") {
-								return `  ↳ ${base} [${raw.rel_type} depth=${raw.hop_depth}]`;
-							}
-							return base;
-						}).join("\n");
+						// Concept match — simple substring
+						const allConcepts: any[] = parseJson<any[]>(conceptResult.stdout) ?? [];
+						const q = params.query.toLowerCase();
+						const matchedConcepts = allConcepts.filter(c =>
+							c.name?.toLowerCase().includes(q) || c.description?.toLowerCase().includes(q)
+						);
 
-						return {
-							content: [{ type: "text", text: results.length ? `${results.length} result(s):\n${summary}` : "No results." }],
-							details: { action: "search", memories: results, message: `${results.length} results` } as MemoryDetails,
-						};
-					}
-
-					// ---- list ----
-					case "list": {
-						const args = ["list", "--json"];
-						if (params.scope) args.push("--scope", params.scope);
-						if (params.type)  args.push("--type", params.type);
-						if (params.limit) args.push("--limit", String(params.limit));
-
-						const { stdout } = await execVoidm(args);
-						const parsed = parseJson<any[]>(stdout) ?? [];
-						const results = parsed.map(memoryFromJson);
-						memoryCache = results;
-
-						const summary = results.map(m =>
-							`[${m.type}] ${m.id.slice(0, 8)} (imp:${m.importance}) — ${oneLine(m.content, 80)}`
-						).join("\n");
-
-						return {
-							content: [{ type: "text", text: `${results.length} memory(ies):\n${summary}` }],
-							details: { action: "list", memories: results, message: `${results.length} memories` } as MemoryDetails,
-						};
-					}
-
-					// ---- delete ----
-					case "delete": {
-						if (!params.id) return err("delete", "id is required");
-
-						const { stdout, code } = await execVoidm(["delete", params.id, "--yes", "--json"]);
-						if (code !== 0) {
-							const e = parseJson<any>(stdout);
-							return err("delete", e?.error ?? `Memory ${params.id} not found`);
+						let text = "";
+						if (memories.length) {
+							text += `${memories.length} memory result(s):\n\n`;
+							text += memories.map(m => {
+								const header = `[${m.type}] [${m.id.slice(0, 8)}] imp:${m.importance}${m.scopes[0] ? ` (${m.scopes[0]})` : ""}`;
+								return `${header}\n${m.content}`;
+							}).join("\n\n");
 						}
-						memoryCache = memoryCache.filter(m => m.id !== params.id);
+						if (matchedConcepts.length) {
+							if (text) text += "\n\n";
+							text += `${matchedConcepts.length} concept(s) matching "${params.query}":\n`;
+							text += matchedConcepts.map(c => {
+								let s = `[concept] [${c.id.slice(0, 8)}] ${c.name}`;
+								if (c.description) s += ` — ${c.description}`;
+								if (c.scope) s += ` (${c.scope})`;
+								return s;
+							}).join("\n");
+						}
+						if (!text) text = `No memories or concepts found for "${params.query}".`;
 
 						return {
-							content: [{ type: "text", text: `Deleted memory ${params.id}` }],
-							details: { action: "delete", memories: [...memoryCache], message: "Deleted" } as MemoryDetails,
+							content: [{ type: "text", text }],
+							details: { action: "recall", memories, message: `${memories.length} memories, ${matchedConcepts.length} concepts` } as MemoryDetails,
 						};
 					}
 
-					// ---- link ----
-					case "link": {
-						if (!params.from_id) return err("link", "from_id is required");
-						if (!params.rel)     return err("link", "rel is required");
-						if (!params.to_id)   return err("link", "to_id is required");
-						if (params.rel === "RELATES_TO" && !params.note)
-							return err("link", "note is required when rel=RELATES_TO");
+					// ── relate ────────────────────────────────────────────────────────────
+					case "relate": {
+						if (!params.from_id) return err("relate", "from_id is required");
+						if (!params.rel)     return err("relate", "rel is required");
+						if (!params.to_id)   return err("relate", "to_id is required");
+						if (params.rel === "RELATES_TO" && !params.note) return err("relate", "note is required when rel=RELATES_TO");
 
-						const args = ["link", params.from_id, params.rel, params.to_id];
+						const args = ["link", params.from_id, params.rel, params.to_id, "--json"];
 						if (params.note) args.push("--note", params.note);
-						args.push("--json");
 
 						const { stdout, code } = await execVoidm(args);
-						if (code !== 0) {
-							const e = parseJson<any>(stdout);
-							return err("link", e?.error ?? stdout);
-						}
-
+						if (code !== 0) return err("relate", parseJson<any>(stdout)?.error ?? stdout);
+						const msg = `Linked [${params.from_id.slice(0, 8)}] -[${params.rel}]→ [${params.to_id.slice(0, 8)}]`;
 						return {
-							content: [{ type: "text", text: `Linked: ${params.from_id.slice(0,8)} -[${params.rel}]→ ${params.to_id.slice(0,8)}` }],
-							details: { action: "link", memories: [...memoryCache], message: "Linked" } as MemoryDetails,
+							content: [{ type: "text", text: msg }],
+							details: { action: "relate", memories: memoryCache, message: msg } as MemoryDetails,
 						};
 					}
 
-					// ---- neighbors ----
-					case "neighbors": {
-						if (!params.id) return err("neighbors", "id is required");
-
-						const args = ["graph", "neighbors", params.id, "--json"];
-						if (params.depth) args.push("--depth", String(params.depth));
+					// ── concept_add ───────────────────────────────────────────────────────
+					case "concept_add": {
+						if (!params.name) return err("concept_add", "name is required");
+						const args = ["ontology", "concept", "add", params.name, "--json"];
+						if (params.description) args.push("--description", params.description);
+						if (params.scope)       args.push("--scope", params.scope);
 
 						const { stdout, code } = await execVoidm(args);
-						if (code !== 0) {
-							const e = parseJson<any>(stdout);
-							return err("neighbors", e?.error ?? stdout);
-						}
+						if (code !== 0) return err("concept_add", parseJson<any>(stdout)?.error ?? stdout);
+						const concept = parseJson<any>(stdout);
+						if (!concept?.id) return err("concept_add", "unexpected response");
 
-						const neighbors = parseJson<any[]>(stdout) ?? [];
-						const summary = neighbors.map(n =>
-							`[depth ${n.depth}] ${n.memory_id.slice(0,8)} via ${n.rel_type} (${n.direction})`
-						).join("\n");
-
+						const msg = `Concept created: ${concept.name} [${concept.id.slice(0, 8)}]${concept.description ? ` — ${concept.description}` : ""}`;
 						return {
-							content: [{ type: "text", text: neighbors.length ? `${neighbors.length} neighbor(s):\n${summary}` : "No neighbors." }],
-							details: { action: "neighbors", memories: [...memoryCache], message: `${neighbors.length} neighbors` } as MemoryDetails,
+							content: [{ type: "text", text: msg }],
+							details: { action: "concept_add", memories: memoryCache, message: msg } as MemoryDetails,
 						};
 					}
 
-					// ---- pagerank ----
-					case "pagerank": {
-						const args = ["graph", "pagerank", "--json", "--top", String(params.limit ?? 10)];
-						const { stdout } = await execVoidm(args);
-						const ranked = parseJson<any[]>(stdout) ?? [];
-						const summary = ranked.map((r, i) => `#${i+1} [${r.score?.toFixed(4)}] ${r.id}`).join("\n");
+					// ── concept_get ───────────────────────────────────────────────────────
+					case "concept_get": {
+						if (!params.id) return err("concept_get", "id is required");
+						const { stdout, code } = await execVoidm(["ontology", "concept", "get", params.id, "--json"]);
+						if (code !== 0) return err("concept_get", parseJson<any>(stdout)?.error ?? stdout);
+						const c = parseJson<any>(stdout);
+						if (!c?.id) return err("concept_get", "not found");
+
+						let text = `[${c.id.slice(0, 8)}] ${c.name}`;
+						if (c.description) text += `\n  ${c.description}`;
+						if (c.scope)       text += `\n  scope: ${c.scope}`;
+						if (c.superclasses?.length) text += `\n  IS_A: ${c.superclasses.map((x: any) => x.name).join(", ")}`;
+						if (c.subclasses?.length)   text += `\n  Subclasses: ${c.subclasses.map((x: any) => x.name).join(", ")}`;
+						if (c.instances?.length) {
+							text += `\n  Instances (${c.instances.length}):`;
+							for (const inst of c.instances.slice(0, 5)) {
+								text += `\n    [${inst.memory_id.slice(0, 8)}] ${inst.preview}`;
+							}
+							if (c.instances.length > 5) text += `\n    … ${c.instances.length - 5} more`;
+						} else {
+							text += `\n  Instances: none`;
+						}
 
 						return {
-							content: [{ type: "text", text: ranked.length ? `Top ${ranked.length} by PageRank:\n${summary}` : "No graph data yet." }],
-							details: { action: "pagerank", memories: [...memoryCache], message: "PageRank computed" } as MemoryDetails,
+							content: [{ type: "text", text }],
+							details: { action: "concept_get", memories: memoryCache, message: text } as MemoryDetails,
 						};
 					}
 
-					// ---- cypher ----
-					case "cypher": {
-						if (!params.cypher_query) return err("list", "cypher_query is required for cypher action");
+					// ── link_to_concept ───────────────────────────────────────────────────
+					case "link_to_concept": {
+						if (!params.memory_id) return err("link_to_concept", "memory_id is required");
+						if (!params.id)        return err("link_to_concept", "id (concept) is required");
 
-						const { stdout, stderr, code } = await execVoidm(["graph", "cypher", "--json", params.cypher_query]);
-						if (code !== 0) {
-							// voidm exits 2 for write-clause rejection or parse error
-							const msg = stderr.trim() || stdout.trim();
-							return err("list", msg);
-						}
+						const args = ["ontology", "link", params.memory_id, "--from-kind", "memory",
+							"INSTANCE_OF", params.id, "--to-kind", "concept", "--json"];
+						const { stdout, code } = await execVoidm(args);
+						if (code !== 0) return err("link_to_concept", parseJson<any>(stdout)?.error ?? stdout);
 
-						const rows = parseJson<Record<string, any>[]>(stdout) ?? [];
-						const summary = rows.length
-							? rows.map(row => Object.entries(row).map(([k, v]) => `${k}: ${v}`).join("  |  ")).join("\n")
-							: "No results.";
-
+						const msg = `Memory [${params.memory_id.slice(0, 8)}] is now an instance of concept [${params.id.slice(0, 8)}]`;
 						return {
-							content: [{ type: "text", text: `${rows.length} row(s):\n${summary}` }],
-							details: { action: "list", memories: [...memoryCache], message: `${rows.length} rows` } as MemoryDetails,
+							content: [{ type: "text", text: msg }],
+							details: { action: "link_to_concept", memories: memoryCache, message: msg } as MemoryDetails,
 						};
 					}
 
 					default:
-						return err("list", `Unknown action: ${(params as any).action}`);
+						return err("memory", `Unknown action: ${(params as any).action}`);
 				}
 			} catch (e) {
-				const msg = e instanceof Error ? e.message : String(e);
-				return err(params.action, msg);
+				return err(params.action, e instanceof Error ? e.message : String(e));
 			}
 		},
 
 		renderCall(args, theme) {
-			let text = theme.fg("toolTitle", theme.bold("memory ")) + theme.fg("muted", args.action);
-			if (args.content)      text += " " + theme.fg("dim", `"${oneLine(args.content, 40)}"`);
-			if (args.query)        text += " " + theme.fg("accent", `"${oneLine(args.query, 30)}"`);
-			if (args.cypher_query) text += " " + theme.fg("accent", oneLine(args.cypher_query, 60));
-			if (args.id)           text += " " + theme.fg("dim", args.id.slice(0, 8));
-			if (args.from_id)      text += " " + theme.fg("dim", `${args.from_id.slice(0,8)} -[${args.rel}]→ ${args.to_id?.slice(0,8)}`);
-			if (args.type)         text += " " + theme.fg("dim", `[${args.type}]`);
-			if (args.scope)        text += " " + theme.fg("dim", `@${args.scope}`);
+			const actionColor: Record<string, ThemeColor> = {
+				remember: "success", recall: "accent", relate: "muted",
+				concept_add: "warning", concept_get: "warning", link_to_concept: "warning",
+			};
+			const col = actionColor[args.action] ?? "muted" as ThemeColor;
+			let text = theme.fg("toolTitle", "memory ") + theme.fg(col, args.action);
+			if (args.query)   text += " " + theme.fg("dim", `"${oneLine(args.query, 40)}"`);
+			if (args.content) text += " " + theme.fg("dim", `"${oneLine(args.content, 40)}"`);
+			if (args.name)    text += " " + theme.fg("dim", args.name);
+			if (args.id)      text += " " + theme.fg("dim", args.id);
 			return new Text(text, 0, 0);
 		},
 
 		renderResult(result, { expanded }, theme) {
 			const d = result.details as MemoryDetails | undefined;
-			if (!d) return new Text(result.content[0]?.type === "text" ? (result.content[0] as any).text : "", 0, 0);
+			if (!d) return new Text(theme.fg("dim", (result.content?.[0] as any)?.text ?? "done"), 0, 0);
 			if (d.error) return new Text(theme.fg("error", `✗ ${d.error}`), 0, 0);
 
 			switch (d.action) {
-				case "add": {
-					const m = d.memories[0];
-					if (!m) return new Text(theme.fg("dim", "added"), 0, 0);
-					const typeColor = typeColors[m.type] ?? "muted";
-					let t = theme.fg("success", "✓ ") + theme.fg(typeColor, m.type) + " " + theme.fg("text", oneLine(m.content, 50));
-					if (d.message?.includes("Duplicate")) t += "\n" + theme.fg("warning", "⚠ duplicate warning");
-					if (d.message?.includes("Suggested")) t += "\n" + theme.fg("accent", "→ suggested links available");
+				case "remember": {
+					const mem = d.memories?.[0];
+					if (!mem) return new Text(theme.fg("muted", d.message ?? "stored"), 0, 0);
+					const col = typeColors[mem.type] ?? "muted";
+					let t = theme.fg("success", "✓ ") + theme.fg(col, mem.type.slice(0, 3).toUpperCase());
+					t += " " + theme.fg("dim", `[${mem.id.slice(0, 8)}]`);
+					if (expanded) t += "\n" + theme.fg("muted", oneLine(mem.content, 80));
 					return new Text(t, 0, 0);
 				}
-				case "search":
-				case "list": {
-					if (!d.memories.length) return new Text(theme.fg("dim", d.message ?? "No results"), 0, 0);
-					let t = theme.fg("muted", `${d.memories.length} memory(ies)`);
-					const show = expanded ? d.memories : d.memories.slice(0, 5);
+				case "recall": {
+					if (!d.memories.length) return new Text(theme.fg("dim", d.message ?? "no results"), 0, 0);
+					let t = theme.fg("muted", `${d.memories.length} result(s)`);
+					const show = expanded ? d.memories : d.memories.slice(0, 3);
 					for (const m of show) {
-						const c = typeColors[m.type] ?? "muted";
-						t += `\n${theme.fg(c, m.type.slice(0,3).toUpperCase())} ${theme.fg("dim", `[${m.importance}]`)} ${theme.fg("text", oneLine(m.content, 60))}`;
+						const col = typeColors[m.type] ?? "muted";
+						t += `\n${theme.fg(col, m.type.slice(0, 3).toUpperCase())} ${theme.fg("dim", `[${m.importance}]`)} ${theme.fg("text", oneLine(m.content, 60))}`;
 					}
-					if (!expanded && d.memories.length > 5) t += `\n${theme.fg("dim", `… ${d.memories.length - 5} more`)}`;
+					if (!expanded && d.memories.length > 3) t += `\n${theme.fg("dim", `… ${d.memories.length - 3} more`)}`;
 					return new Text(t, 0, 0);
 				}
-				case "delete":   return new Text(theme.fg("success", "✓ deleted"), 0, 0);
-				case "link":     return new Text(theme.fg("success", "✓ ") + theme.fg("muted", d.message ?? "linked"), 0, 0);
-				case "neighbors":
-				case "pagerank": return new Text(theme.fg("muted", d.message ?? "done"), 0, 0);
-				default:         return new Text(theme.fg("muted", d.message ?? "done"), 0, 0);
+				case "relate":
+					return new Text(theme.fg("success", "✓ ") + theme.fg("muted", d.message ?? "linked"), 0, 0);
+				case "concept_add":
+					return new Text(theme.fg("success", "✓ ") + theme.fg("warning", d.message ?? "concept created"), 0, 0);
+				case "concept_get":
+					return new Text(theme.fg("warning", "◆ ") + theme.fg("muted", d.message?.split("\n")[0] ?? "concept"), 0, 0);
+				case "link_to_concept":
+					return new Text(theme.fg("success", "✓ ") + theme.fg("muted", d.message ?? "linked"), 0, 0);
+				default:
+					return new Text(theme.fg("dim", d.message ?? "done"), 0, 0);
 			}
 		},
 	});
 
-	// -------------------------------------------------------------------------
-	// /memories command — TUI browser
-	// -------------------------------------------------------------------------
+	// ---------------------------------------------------------------------------
+	// /memories command — human TUI browser
+	// ---------------------------------------------------------------------------
 	pi.registerCommand("memories", {
 		description: "Browse memories with search and navigation",
 		handler: async (_args, ctx) => {
@@ -758,34 +683,23 @@ Actions:
 				return;
 			}
 			ctx.ui.setStatus("voidm", "Loading memories…");
-			const { stdout, code } = await execVoidm(["list", "--json", "--limit", "500"]);
+			const result = await execVoidm(["list", "--json", "--limit", "200"]);
 			ctx.ui.setStatus("voidm", undefined);
-			if (code !== 0) {
-				ctx.ui.notify("voidm list failed", "error");
-				return;
-			}
-			const parsed = parseJson<any[]>(stdout) ?? [];
+			const parsed = parseJson<any[]>(result.stdout) ?? [];
 			const memories = parsed.map(memoryFromJson);
-			memoryCache = memories;
 
-			await ctx.ui.custom<void>((_tui, theme, _kb, done) => {
-				const browser = new MemoryBrowser(memories, theme, () => done(), execVoidm);
-				return {
-					render: (width: number) => browser.render(width),
-					handleInput: (data: string) => browser.handleInput(data),
+			await ctx.ui.custom<void>((tui, theme, _kb, done) => {
+				const browser = new MemoryBrowser(memories, theme, done, execVoidm);
+				const component = {
+					render(width: number) { return browser.render(width); },
+					invalidate() { tui.invalidate(); },
+					onKey: async (data: string) => {
+						await browser.handleInput(data);
+						tui.invalidate();
+					},
 				};
+				return component as any;
 			});
 		},
 	});
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function err(action: MemoryDetails["action"], message: string) {
-	return {
-		content: [{ type: "text" as const, text: `Error: ${message}` }],
-		details: { action, memories: [], error: message } as MemoryDetails,
-	};
 }

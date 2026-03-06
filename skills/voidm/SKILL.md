@@ -7,9 +7,9 @@ description: "Persistent semantic memory for agents (principles, patterns, insig
 
 ## Overview
 
-`voidm` is the agent memory tool. Memories persist across sessions in a local SQLite database with hybrid search (vector + BM25 + fuzzy) and a graph layer for linking related memories.
+`voidm` is the agent memory tool. Memories persist across sessions in a local SQLite database with hybrid search (vector + BM25 + fuzzy) and an ontology layer for concepts and relationships.
 
-**Always use the `memory` tool** — it is the preferred interface. The `voidm` CLI exists for humans and debugging. Do not call the CLI directly unless the `memory` tool is unavailable.
+**Always use the `memory` tool** — it is the preferred interface.
 
 ## Memory vs Todos vs Skills
 
@@ -19,8 +19,8 @@ description: "Persistent semantic memory for agents (principles, patterns, insig
 | Purpose | Current tasks | Principles & insights | How-to guides |
 | Lifespan | Ephemeral | Permanent | Permanent |
 
-**What to store:** principles, patterns, decisions, constraints, lessons learned, system knowledge.
-**What NOT to store:** task logs ("fixed X"), session summaries, duplicates of what's in skills.
+**Store:** principles, patterns, decisions, constraints, lessons learned, system knowledge.
+**Don't store:** task logs, session summaries, duplicates of skills.
 
 ## Memory Types
 
@@ -32,148 +32,62 @@ description: "Persistent semantic memory for agents (principles, patterns, insig
 | `conceptual` | Architectural decisions, the *why* behind choices |
 | `contextual` | Project/env-specific facts: config, conventions, constraints |
 
-**Decision flowchart:**
-- Step-by-step process? → `procedural`
-- Why a decision was made? → `conceptual`
-- Timeless fact? → `semantic`
-- Project/env-specific? → `contextual`
-- Something that happened? → `episodic`
+---
+
+## Tool Actions
+
+### `remember` — store a memory
+```
+action=remember, content="...", type=semantic
+action=remember, content="...", type=contextual, scope=project/auth, tags="jwt,oauth", importance=8
+```
+Response includes suggested links (≥0.7 similarity) and duplicate warnings (≥0.95). Call `relate` for relevant suggested links.
+
+### `recall` — search memories and concepts
+```
+action=recall, query="rust error handling patterns"
+action=recall, query="auth service", scope=project/auth, limit=5
+```
+Returns full memory content. Also surfaces matching ontology concepts.
+
+### `relate` — link two memories
+```
+action=relate, from_id="abcd1234", rel=SUPPORTS, to_id="efgh5678"
+action=relate, from_id="abcd", rel=RELATES_TO, to_id="efgh", note="both deal with JWT expiry"
+```
+Rels: `SUPPORTS` | `CONTRADICTS` | `DERIVED_FROM` | `PRECEDES` | `PART_OF` | `EXEMPLIFIES` | `RELATES_TO`
 
 ---
 
-## Using the `memory` Tool
+## Ontology Actions
 
-This is the **primary interface**. All actions go through a single `memory` tool call.
-
-### Add
-
+### `concept_add` — define a concept class
 ```
-action=add, content="...", type=semantic, scope=work/acme, tags="rust,perf", importance=8
+action=concept_add, name="AuthService", description="Handles JWT + OAuth2 flows", scope=project/auth
 ```
 
-Response includes:
-- `suggested_links` (similarity ≥ 0.7) — check these and call `action=link` for relevant ones
-- `duplicate_warning` (similarity ≥ 0.95) — near-identical content exists, consider skipping
-
-### Search
-
+### `concept_get` — inspect a concept
 ```
-action=search, query="deployment checklist", scope=work/acme
-action=search, query="database", mode=semantic, min_score=0
+action=concept_get, id="abcd1234"
 ```
+Returns: name, description, IS_A parents, subclasses, and linked memory instances.
 
-Modes: `hybrid` (default), `semantic`, `bm25`, `fuzzy`, `keyword`.
-Empty hybrid results include `best_score` — use it to decide whether to retry with lower `min_score`.
-
-### List
-
+### `link_to_concept` — attach memory to concept
 ```
-action=list, scope=work/acme, limit=20
+action=link_to_concept, memory_id="abcd1234", id="efgh5678"
 ```
-
-### Delete
-
-```
-action=delete, id="65f84c84"
-```
-
-Accepts full UUID or short prefix (min 4 chars).
-
-### Link
-
-```
-action=link, from_id="65f84c84", rel=SUPPORTS, to_id="ee460c0c"
-action=link, from_id="65f84c84", rel=RELATES_TO, to_id="ee460c0c", note="both affect deploy order"
-```
-
-`RELATES_TO` requires `note`. All IDs accept short prefixes.
-
-### Graph: Neighbors
-
-```
-action=neighbors, id="65f84c84", depth=2
-```
-
-### Graph: PageRank
-
-```
-action=pagerank, limit=10
-```
-
-Most-referenced memories = most important context.
-
-### Graph: Cypher
-
-```
-action=cypher, cypher_query="MATCH (a:Memory)-[r]->(b:Memory) RETURN a.memory_id AS from, r.rel_type AS rel, b.memory_id AS to LIMIT 20"
-```
-
-Supported clauses: `MATCH`, `WHERE`, `RETURN`, `ORDER BY`, `LIMIT`, `WITH`. Write operations are rejected.
-Use `AS` aliases when returning multiple node properties to avoid key collisions.
+Makes the memory a concrete INSTANCE_OF the concept class.
 
 ---
 
-## Agent Insertion Workflow
+## Best Practices
 
-1. **Search first** — `action=search` before adding to avoid duplicates
-2. **Add** — `action=add` with content, type, optional scope/tags/importance
-3. **Check `duplicate_warning`** — score ≥ 0.95: skip or delete the old one
-4. **Check `suggested_links`** — for each relevant suggestion, call `action=link` with the appropriate edge type
+1. **Search before storing** — avoid duplicates
+2. **Use scope** for project isolation (`project/name`, `work/team`)
+3. **Link related memories** — the graph improves recall
+4. **Concepts for architecture** — define concepts for key system components, then link memories to them
+5. **Importance 7+** for hard-won lessons; 5 for facts; 3 for transient context
 
-## Edge Types
+## Human TUI
 
-| Edge | Directed | Use when |
-|------|----------|----------|
-| `SUPPORTS` | yes | A confirms or strengthens B |
-| `CONTRADICTS` | yes | A conflicts with B |
-| `DERIVED_FROM` | yes | A was inferred from B |
-| `PRECEDES` | yes | A came before B (causal/temporal) |
-| `PART_OF` | yes | A is a component of B |
-| `EXEMPLIFIES` | yes | A is a concrete instance of abstract B |
-| `INVALIDATES` | yes | A supersedes B (B is outdated) |
-| `RELATES_TO` | undirected | Generic — **requires** `note` |
-
----
-
-## Practical Patterns
-
-### Capture a principle after solving a problem
-
-```
-action=add
-content="N+1 Query: symptom is slow API, root cause is missing eager loading. Fix: add eager loading. Applies to all ORMs."
-type=semantic, scope=debugging, tags="performance,sql", importance=8
-```
-
-### Recall context at session start
-
-```
-action=search, query="project context", scope=work/acme
-action=pagerank, limit=5
-```
-
-### Explore what a memory connects to
-
-```
-action=neighbors, id="65f84c84", depth=2
-action=cypher, cypher_query="MATCH (a:Memory)-[r]->(b:Memory) WHERE a.memory_id = '65f84c84-...' RETURN r.rel_type AS rel, b.memory_id AS to"
-```
-
----
-
-## Importance Scale
-
-- **9-10**: Critical constraints, must-know facts
-- **7-8**: Important patterns, significant decisions
-- **5-6**: Useful but not critical
-- **1-4**: Nice-to-know
-
-Default is 5.
-
----
-
-## Scopes
-
-Slash-delimited namespaces: `project/component/layer`
-
-Search with `scope=work/acme` prefix-matches all children (`work/acme/backend`, etc.).
+`/memories` — browse, search, and delete memories interactively.
