@@ -391,7 +391,8 @@ export default function (pi: ExtensionAPI) {
 			"[Memory workflow]",
 			"BEFORE starting: recall relevant context — memory action=recall query=\"<topic or tool from the task>\"",
 			`Task hint: "${promptHint}"`,
-			"AFTER completing: store new knowledge (decisions, gotchas, patterns) — memory action=remember",
+			"AFTER completing: IF you discovered non-obvious knowledge (gotcha, decision, constraint), store it.",
+			"DON'T store: task logs, TODO status, session summaries, obvious facts.",
 		].join("\n");
 		return { systemPrompt: e.systemPrompt + "\n\n---" + reminder + "\n---" };
 	});
