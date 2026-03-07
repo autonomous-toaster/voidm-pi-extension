@@ -5,199 +5,66 @@ description: "Persistent semantic memory for agents (principles, patterns, insig
 
 # voidm — Agent Memory Tool
 
-## Overview
+Persistent memory across sessions: `memory` tool with hybrid search (vector + BM25 + fuzzy), ontology, quality scoring.
 
-`voidm` is the agent memory tool. Memories persist across sessions in a local SQLite database with hybrid search (vector + BM25 + fuzzy) and an ontology layer for concepts and relationships.
+**Always use the `memory` tool** (not CLI commands).
 
-**Always use the `memory` tool** — it is the preferred interface.
+## Quick Start
 
-## Using the Memory Tool
+**Before task:** `action=recall, query="<topic or tech>", scope="project/name"` (search memory)
 
-**Always use the `memory` tool** for all memory operations. Do NOT use:
-- ❌ `voidm` CLI commands via bash
-- ❌ Direct file/DB access
-- ❌ Grep/search on memory files
-
-The tool provides the correct interface and maintains state consistency.
-
----
-
-## Workflow — Do This Every Session
-
-### Before starting any task
-**Search memory first.** The user may have worked on this before. You may have stored relevant patterns, constraints, architecture decisions, or tool-specific knowledge.
-
-```
-action=recall, query="<topic or technology from the task>"
-action=recall, query="<framework or tool name>"
-action=recall, query="<project name>", scope="project/name"
-```
-
-Examples:
-- About to write a FastAPI route → `recall query="fastapi dependency injection"`
-- About to touch auth code → `recall query="auth service JWT"`, `recall query="oauth patterns"`
-- Debugging a Rust compile error → `recall query="rust borrow checker patterns"`
-- Starting a new feature → `recall query="<project name> architecture"`
-
-If you find relevant memories: apply that knowledge. If something has changed, update the memory.
-
-### After completing a task
-**Store what you learned** — but only if it's non-obvious knowledge worth remembering.
-
-Ask yourself:
-- Did I discover a **non-obvious constraint or gotcha**? → `remember` it (semantic, importance 7+)
-- Did I make an **architectural or design decision**? → `remember` it (conceptual, importance 8+)
-- Did I work out a **step-by-step process**? → `remember` it (procedural, importance 7+)
-- Did I find a **project-specific convention**? → `remember` it (contextual, importance 6+)
-
-**Don't store:**
-- Task completion: "Fixed bug X", "TODO-abc done"
-- Session summaries: "Today I worked on Y"
-- Obvious facts already in skills
-
-Before storing, search to avoid duplicates. If a similar memory exists, update it instead (delete + re-add with improved content).
-
----
-
-## Memory vs Todos vs Skills
-
-| Aspect | Todos | Memories | Skills |
-|--------|-------|----------|--------|
-| Scope | Session-only | Persistent | Global |
-| Purpose | Current tasks | Principles & insights | How-to guides |
-| Lifespan | Ephemeral | Permanent | Permanent |
-
-**Store:** principles, patterns, decisions, constraints, lessons learned, system knowledge.
-
-**Don't store:**
-- ❌ Session summaries: "Today I worked on X"
-- ❌ Task completion logs: "Fixed bug in file.py", "TODO-abc completed"
-- ❌ TODO status updates: "Milestone reached", "Task refined"
-- ❌ Temporary context: "User is working on project X"
-- ❌ Duplicate skills: Don't copy skill content into memory
-- ❌ Obvious facts: "Python uses indentation" (already in skills)
-
----
+**After task:** Store non-obvious knowledge only (gotchas, decisions, patterns, lessons).
 
 ## Memory Types
 
-| Type | When to use |
-|------|-------------|
-| `episodic` | Time-bound events, lessons from specific experiences |
-| `semantic` | Timeless facts, rules, best practices |
-| `procedural` | Step-by-step workflows, runbooks |
-| `conceptual` | Architectural decisions, the *why* behind choices |
-| `contextual` | Project/env-specific facts: config, conventions, constraints |
-
----
+- **semantic**: timeless facts, rules, principles
+- **procedural**: step-by-step workflows
+- **conceptual**: architectural decisions ("why")
+- **episodic**: lessons from specific events
+- **contextual**: project-specific facts/conventions
 
 ## Tool Actions
 
-### `remember` — store a memory
 ```
-action=remember, content="...", type=semantic
-action=remember, content="...", type=contextual, scope=project/auth, tags="jwt,oauth", importance=8
-```
-Response includes suggested links (≥0.7 similarity) and duplicate warnings (≥0.95). Call `relate` for relevant suggested links.
-
-### `recall` — search memories and concepts
-```
-action=recall, query="rust error handling patterns"
-action=recall, query="auth service", scope=project/auth, limit=5
-```
-Returns full memory content. Also surfaces matching ontology concepts.
-
-### `relate` — link two memories
-```
-action=relate, from_id="abcd1234", rel=SUPPORTS, to_id="efgh5678"
-action=relate, from_id="abcd", rel=RELATES_TO, to_id="efgh", note="both deal with JWT expiry"
-```
-Rels: `SUPPORTS` | `CONTRADICTS` | `DERIVED_FROM` | `PRECEDES` | `PART_OF` | `EXEMPLIFIES` | `RELATES_TO`
-
-### `delete` — remove a memory
-```
-action=delete, memory_id="abcd1234"
-action=delete, memory_id="abcd"  # short prefix works
+action=remember, content="...", type=semantic, importance=8
+action=recall, query="...", scope="project/name", limit=5
+action=relate, from_id="abc", rel=SUPPORTS, to_id="def"
+action=delete, memory_id="abc"
+action=concept_add, name="AuthService", description="...", scope="project/auth"
+action=link_to_concept, memory_id="abc", id="def"
 ```
 
-**Use with caution.** Only delete:
-- Duplicates (after checking with recall)
-- Memories that triggered quality warnings (task logs, TODO status, session summaries)
-- Obvious mistakes (wrong type, wrong content)
+Relationships: `SUPPORTS` | `CONTRADICTS` | `DERIVED_FROM` | `PRECEDES` | `PART_OF` | `EXEMPLIFIES` | `RELATES_TO`
 
-Don't delete memories just because they're old or seem unused.
+## Don't Store
 
----
+- ❌ Task completion: "Fixed bug X", "TODO-abc done"
+- ❌ Session summaries: "Today I worked on Y"
+- ❌ Obvious facts or skill duplicates
+- ❌ Time-anchored context: "yesterday", "this session"
 
-## Ontology Actions
+## Quality Guidance
 
-### `concept_add` — define a concept class
-```
-action=concept_add, name="AuthService", description="Handles JWT + OAuth2 flows", scope=project/auth
-```
+Server computes quality score (0.0-1.0) during insert:
 
-### `concept_get` — inspect a concept
-```
-action=concept_get, id="abcd1234"
-```
-Returns: name, description, IS_A parents, subclasses, and linked memory instances.
+- **< 0.5**: Retry with better content (remove markers, improve genericity)
+- **0.5-0.7**: Acceptable, consider refining
+- **≥ 0.7**: Good, trust server over client warnings
 
-### `link_to_concept` — attach memory to concept
-```
-action=link_to_concept, memory_id="abcd1234", id="efgh5678"
-```
-Makes the memory a concrete INSTANCE_OF the concept class.
+**Scoring factors**: genericity (no "I"/"my"), abstraction (principle not instance), temporal independence, task independence, substance (50+ words).
 
----
-
-## Quality Warnings
-
-The tool checks memory content for anti-patterns. Warnings don't block storage—they're guidance to help you self-correct.
-
-### Detected Patterns
-
-**1. Task logs** — Regex: `\b(milestone|completed|finished|done|fixed)\b`
-- ❌ "MILESTONE: TODO-a1a0b62f Refinement Complete"
-- ❌ "All Tier 1 tasks done today"
-- ✅ "Multi-instance isolation completed the design" (acceptable context)
-
-**2. TODO identifiers** — Regex: `TODO-[0-9a-f]{8}`
-- ❌ "TODO-abc12345 fixed in refactor"
-- ❌ "See TODO-a1a0b62f for details"
-
-**3. Time markers** — Regex: `\b(today|yesterday|this session|this morning)\b`
-- ❌ "Today I worked on authentication"
-- ❌ "This session: completed 3 features"
-
-**4. Status prefixes** — Regex: `^(date|status|update):`
-- ❌ "Status: implementation ready"
-- ❌ "Date: March 7, 2026 — completed tasks"
-
-**5. Length extremes** — Content <30 chars or >300 words
-- ❌ "Done" (too short)
-- ❌ "Multi-paragraph essay about..." (too long — split it)
-
-### Interpreting Warnings
-
-If you see a warning but the memory is actually valuable:
-- You can override and store anyway (warnings are non-blocking)
-- But review the pattern — task logs rarely survive to next session
-
-Example fix: Instead of storing "MILESTONE: TODO-a1a0b62f complete", store the learned principle:
-- ❌ "MILESTONE: TODO-a1a0b62f Refinement Complete"
-- ✅ "Separation of ontology_concepts and ontology_edges prevents concept reuse issues"
-
----
+Example fix:
+- ❌ "Today I fixed auth bug. Task done."
+- ✅ "Auth separation: validation independent from storage/expiry for testing and reuse."
 
 ## Best Practices
 
-1. **Recall before acting** — always search before starting a task
-2. **Search before storing** — avoid duplicates; update existing memories instead
-3. **Use scope** for project isolation (`project/name`, `work/team`)
-4. **Link related memories** — the graph improves future recall
-5. **Concepts for architecture** — define concepts for key components, link memories to them
-6. **Importance 8+** for hard-won lessons; 5 for general facts; 3 for transient context
+1. Search before storing (avoid duplicates)
+2. Respect quality < 0.5 as retry signal
+3. Link related memories (improves recall)
+4. Use scopes for project isolation
+5. Define concepts for architecture
 
 ## Human TUI
 
-`/memories` — browse, search, and delete memories interactively.
+`/memories` — browse, search, delete.

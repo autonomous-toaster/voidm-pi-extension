@@ -89,17 +89,27 @@ function oneLine(s: string, max: number): string {
 function checkMemoryQuality(content: string): { ok: boolean; warnings: string[] } {
 	const warnings: string[] = [];
 
-	// Task log patterns
+	// Task log patterns - refined to reduce false positives
 	if (/TODO-[0-9a-f]{8}/i.test(content)) {
 		warnings.push("⚠ Contains TODO identifier — avoid storing task status");
 	}
-	if (/\b(milestone|completed|finished|done|fixed)\b/i.test(content)) {
+	
+	// Task language: only warn if clearly in context of completion (not "completion" noun or "implement" verb)
+	// Match "done" / "finished" / "fixed" as standalone words (likely past tense verbs)
+	// Exclude "completed/completion" as they're often legitimate nouns
+	if (/\b(finished|done|fixed)\b/i.test(content) && 
+	    /\b(task|issue|bug|feature|work|milestone)\b/i.test(content)) {
 		warnings.push("⚠ Looks like a task log — store the lesson, not the completion");
 	}
-	if (/\b(today|yesterday|this session|this morning)\b/i.test(content)) {
+	
+	// Temporal markers - only warn if present (legitimately anchoring to session)
+	if (/\b(today|yesterday|this session|this morning)\b/i.test(content) &&
+	    !/^(Procedure|Step|Example|Note):/i.test(content)) {
 		warnings.push("⚠ Contains time markers — memories should be timeless principles");
 	}
-	if (/^(date|status|update):/i.test(content)) {
+	
+	// Status prefixes - only at document start AND clearly session-related
+	if (/^(date|status|update):\s+(march|april|today|yesterday|2026|pending|complete)/i.test(content)) {
 		warnings.push("⚠ Starts with status marker — avoid session summaries");
 	}
 
@@ -503,12 +513,25 @@ Actions:
 
 						let msg = `Stored [${mem.id.slice(0, 8)}] (${mem.type}${params.scope ? `, ${params.scope}` : ""})`;
 						
-						// Quality warnings
-						if (!quality.ok) {
+						// Quality score from server
+						const serverQuality = resp.quality_score as number | undefined;
+						if (serverQuality !== undefined && serverQuality !== null) {
+							msg += ` — Quality: ${serverQuality.toFixed(2)}`;
+						}
+						
+						// Quality warnings - only show if server quality is low (< 0.7)
+						// If server quality is good, client warnings are likely false positives
+						const shouldShowClientWarnings = serverQuality === undefined || serverQuality < 0.7;
+						if (!quality.ok && shouldShowClientWarnings) {
 							msg += `\n\nQuality warnings:`;
 							for (const w of quality.warnings) {
 								msg += `\n${w}`;
 							}
+						}
+						
+						// If server quality is good but client warned, show reassurance
+						if (!quality.ok && !shouldShowClientWarnings) {
+							msg += `\n✓ Client regex warned, but server analysis shows this is acceptable (score ${serverQuality?.toFixed(2)})`;
 						}
 						
 						const dup = resp.duplicate_warning;
