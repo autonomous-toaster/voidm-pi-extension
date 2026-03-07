@@ -436,6 +436,12 @@ export default function (pi: ExtensionAPI) {
 			`Task hint: "${promptHint}"`,
 			"AFTER completing: IF you discovered non-obvious knowledge (gotcha, decision, constraint), store it.",
 			"DON'T store: task logs, TODO status, session summaries, obvious facts.",
+			"",
+			"[Quality score guidance]",
+			"When tools return memory with quality_score:",
+			"- quality_score < 0.5: BINDING RETRY — don't use this memory, prefer recall with better query",
+			"- quality_score 0.5-0.7: CHECK — verify manually before relying on it",
+			"- quality_score >= 0.7: ACCEPT — reliable for decision-making",
 		].join("\n");
 		return { systemPrompt: e.systemPrompt + "\n\n---" + reminder + "\n---" };
 	});
