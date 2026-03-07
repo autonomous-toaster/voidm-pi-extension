@@ -1,6 +1,6 @@
 {
   "name": "@autonomous-toaster/voidm-pi-extension",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "pi-coding-agent extension for voidm \u2014 local-first persistent memory for LLM agents",
   "keywords": [
     "pi-package",
