@@ -27,7 +27,7 @@ interface Memory {
 }
 
 interface MemoryDetails {
-	action: "remember" | "recall" | "relate" | "concept_add" | "concept_get" | "link_to_concept";
+	action: "remember" | "recall" | "relate" | "concept_add" | "concept_get" | "link_to_concept" | "delete";
 	memories: Memory[];
 	error?: string;
 	message?: string;
@@ -126,6 +126,7 @@ const MemoryParams = Type.Object({
 		"concept_add",    // define a concept (ontology class node)
 		"concept_get",    // inspect a concept + its linked memories
 		"link_to_concept",// attach a memory to a concept
+		"delete",         // delete a memory by ID
 	] as const),
 
 	// remember
@@ -151,11 +152,11 @@ const MemoryParams = Type.Object({
 	to_id:       Type.Optional(Type.String({ description: "Target memory ID or short prefix (for relate)" })),
 	note:        Type.Optional(Type.String({ description: "Optional note, required when rel=RELATES_TO" })),
 
-	// concept_add / concept_get / link_to_concept
+	// concept_add / concept_get / link_to_concept / delete
 	id:          Type.Optional(Type.String({ description: "Concept ID or short prefix (for concept_get, link_to_concept)" })),
 	name:        Type.Optional(Type.String({ description: "Concept name (for concept_add)" })),
 	description: Type.Optional(Type.String({ description: "Concept description (for concept_add)" })),
-	memory_id:   Type.Optional(Type.String({ description: "Memory ID or short prefix to link (for link_to_concept)" })),
+	memory_id:   Type.Optional(Type.String({ description: "Memory ID or short prefix (for link_to_concept, delete)" })),
 });
 
 // ---------------------------------------------------------------------------
@@ -455,6 +456,10 @@ Actions:
              Optional: note (required when rel=RELATES_TO).
              Rels: SUPPORTS | CONTRADICTS | DERIVED_FROM | PRECEDES | PART_OF | EXEMPLIFIES | RELATES_TO
 
+  delete     Delete a memory by ID.
+             Required: memory_id (ID or short prefix).
+             Use with caution - only delete duplicates or low-quality memories flagged by warnings.
+
 ── Ontology ────────────────────────────────────────────────────────────────────
 
   concept_add      Define a concept (class/category node).
@@ -670,6 +675,27 @@ Actions:
 						};
 					}
 
+					// ── delete ────────────────────────────────────────────────────────────
+					case "delete": {
+						if (!params.memory_id) return err("delete", "memory_id is required");
+
+						const args = ["delete", params.memory_id, "--yes", "--json"];
+						const { stdout, code } = await execVoidm(args);
+						if (code !== 0) {
+							const error = parseJson<any>(stdout)?.error ?? stdout;
+							return err("delete", error);
+						}
+
+						// Remove from cache
+						memoryCache = memoryCache.filter(m => !m.id.startsWith(params.memory_id));
+
+						const msg = `Deleted memory [${params.memory_id}]`;
+						return {
+							content: [{ type: "text", text: msg }],
+							details: { action: "delete", memories: [...memoryCache], message: msg } as MemoryDetails,
+						};
+					}
+
 					default:
 						return err("memory", `Unknown action: ${(params as any).action}`);
 				}
@@ -682,6 +708,7 @@ Actions:
 			const actionColor: Record<string, ThemeColor> = {
 				remember: "success", recall: "accent", relate: "muted",
 				concept_add: "warning", concept_get: "warning", link_to_concept: "warning",
+				delete: "error",
 			};
 			const col = actionColor[args.action] ?? "muted" as ThemeColor;
 			let text = theme.fg("toolTitle", "memory ") + theme.fg(col, args.action);
@@ -689,6 +716,9 @@ Actions:
 			if (args.content) text += " " + theme.fg("dim", `"${oneLine(args.content, 40)}"`);
 			if (args.name)    text += " " + theme.fg("dim", args.name);
 			if (args.id)      text += " " + theme.fg("dim", args.id);
+			if (args.memory_id && args.action === "delete") {
+				text += " " + theme.fg("dim", `[${args.memory_id.slice(0, 8)}]`);
+			}
 			return new Text(text, 0, 0);
 		},
 
@@ -726,6 +756,8 @@ Actions:
 					return new Text(theme.fg("warning", "◆ ") + theme.fg("muted", d.message?.split("\n")[0] ?? "concept"), 0, 0);
 				case "link_to_concept":
 					return new Text(theme.fg("success", "✓ ") + theme.fg("muted", d.message ?? "linked"), 0, 0);
+				case "delete":
+					return new Text(theme.fg("error", "✗ ") + theme.fg("muted", d.message ?? "deleted"), 0, 0);
 				default:
 					return new Text(theme.fg("dim", d.message ?? "done"), 0, 0);
 			}

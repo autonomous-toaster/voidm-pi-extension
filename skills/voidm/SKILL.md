@@ -11,6 +11,15 @@ description: "Persistent semantic memory for agents (principles, patterns, insig
 
 **Always use the `memory` tool** — it is the preferred interface.
 
+## Using the Memory Tool
+
+**Always use the `memory` tool** for all memory operations. Do NOT use:
+- ❌ `voidm` CLI commands via bash
+- ❌ Direct file/DB access
+- ❌ Grep/search on memory files
+
+The tool provides the correct interface and maintains state consistency.
+
 ---
 
 ## Workflow — Do This Every Session
@@ -104,6 +113,19 @@ action=relate, from_id="abcd1234", rel=SUPPORTS, to_id="efgh5678"
 action=relate, from_id="abcd", rel=RELATES_TO, to_id="efgh", note="both deal with JWT expiry"
 ```
 Rels: `SUPPORTS` | `CONTRADICTS` | `DERIVED_FROM` | `PRECEDES` | `PART_OF` | `EXEMPLIFIES` | `RELATES_TO`
+
+### `delete` — remove a memory
+```
+action=delete, memory_id="abcd1234"
+action=delete, memory_id="abcd"  # short prefix works
+```
+
+**Use with caution.** Only delete:
+- Duplicates (after checking with recall)
+- Memories that triggered quality warnings (task logs, TODO status, session summaries)
+- Obvious mistakes (wrong type, wrong content)
+
+Don't delete memories just because they're old or seem unused.
 
 ---
 
