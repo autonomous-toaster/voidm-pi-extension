@@ -83,6 +83,38 @@ function oneLine(s: string, max: number): string {
 }
 
 // ---------------------------------------------------------------------------
+// Memory quality checking — anti-pattern detection
+// ---------------------------------------------------------------------------
+
+function checkMemoryQuality(content: string): { ok: boolean; warnings: string[] } {
+	const warnings: string[] = [];
+
+	// Task log patterns
+	if (/TODO-[0-9a-f]{8}/i.test(content)) {
+		warnings.push("⚠ Contains TODO identifier — avoid storing task status");
+	}
+	if (/\b(milestone|completed?|finished|done|fixed)\b/i.test(content)) {
+		warnings.push("⚠ Looks like a task log — store the lesson, not the completion");
+	}
+	if (/\b(today|yesterday|this session|this morning)\b/i.test(content)) {
+		warnings.push("⚠ Contains time markers — memories should be timeless principles");
+	}
+	if (/^(date|status|update):/i.test(content)) {
+		warnings.push("⚠ Starts with status marker — avoid session summaries");
+	}
+
+	// Length checks
+	if (content.length < 30) {
+		warnings.push("⚠ Very short (<30 chars) — add more context for future recall");
+	}
+	if (content.split(/\s+/).length > 300) {
+		warnings.push("⚠ Very long (>300 words) — consider splitting into focused memories");
+	}
+
+	return { ok: warnings.length === 0, warnings };
+}
+
+// ---------------------------------------------------------------------------
 // Tool parameter schema — intentionally minimal
 // ---------------------------------------------------------------------------
 
@@ -448,6 +480,9 @@ Actions:
 						if (!params.content) return err("remember", "content is required");
 						if (!params.type)    return err("remember", "type is required");
 
+						// Quality check — warn but don't block
+						const quality = checkMemoryQuality(params.content);
+
 						const args = ["add", "--type", params.type, "--importance", String(params.importance ?? 5), "--json"];
 						if (params.scope) args.push("--scope", params.scope);
 						if (params.tags)  args.push("--tags", params.tags);
@@ -462,6 +497,15 @@ Actions:
 						memoryCache = [mem, ...memoryCache.filter(m => m.id !== mem.id)];
 
 						let msg = `Stored [${mem.id.slice(0, 8)}] (${mem.type}${params.scope ? `, ${params.scope}` : ""})`;
+						
+						// Quality warnings
+						if (!quality.ok) {
+							msg += `\n\nQuality warnings:`;
+							for (const w of quality.warnings) {
+								msg += `\n${w}`;
+							}
+						}
+						
 						const dup = resp.duplicate_warning;
 						if (dup) msg += `\n⚠ Similar memory exists [${dup.id.slice(0, 8)}] (score ${dup.score.toFixed(2)}): ${oneLine(dup.content, 80)}`;
 						const links: any[] = resp.suggested_links ?? [];
