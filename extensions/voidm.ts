@@ -705,15 +705,13 @@ Actions:
 
 			await ctx.ui.custom<void>((tui, theme, _kb, done) => {
 				const browser = new MemoryBrowser(memories, theme, done, execVoidm);
-				const component = {
+				return {
 					render(width: number) { return browser.render(width); },
-					invalidate() { tui.invalidate(); },
-					onKey: async (data: string) => {
-						await browser.handleInput(data);
-						tui.invalidate();
+					invalidate() { browser.invalidate(); },
+					handleInput(data: string) {
+						browser.handleInput(data).then(() => tui.requestRender());
 					},
 				};
-				return component as any;
 			});
 		},
 	});
