@@ -33,13 +33,18 @@ Examples:
 If you find relevant memories: apply that knowledge. If something has changed, update the memory.
 
 ### After completing a task
-**Store what you learned.** If you discovered something non-obvious, made a key decision, fixed a tricky bug, or found a gotcha — store it so future sessions don't repeat the same work.
+**Store what you learned** — but only if it's non-obvious knowledge worth remembering.
 
 Ask yourself:
-- Did I discover a non-obvious constraint or gotcha? → `remember` it (semantic, importance 7+)
-- Did I make an architectural or design decision? → `remember` it (conceptual, importance 8+)
-- Did I work out a step-by-step process? → `remember` it (procedural, importance 7+)
-- Did I find a project-specific convention? → `remember` it (contextual, importance 6+)
+- Did I discover a **non-obvious constraint or gotcha**? → `remember` it (semantic, importance 7+)
+- Did I make an **architectural or design decision**? → `remember` it (conceptual, importance 8+)
+- Did I work out a **step-by-step process**? → `remember` it (procedural, importance 7+)
+- Did I find a **project-specific convention**? → `remember` it (contextual, importance 6+)
+
+**Don't store:**
+- Task completion: "Fixed bug X", "TODO-abc done"
+- Session summaries: "Today I worked on Y"
+- Obvious facts already in skills
 
 Before storing, search to avoid duplicates. If a similar memory exists, update it instead (delete + re-add with improved content).
 
@@ -54,7 +59,14 @@ Before storing, search to avoid duplicates. If a similar memory exists, update i
 | Lifespan | Ephemeral | Permanent | Permanent |
 
 **Store:** principles, patterns, decisions, constraints, lessons learned, system knowledge.
-**Don't store:** task logs ("fixed bug X"), session summaries, duplicates of skills.
+
+**Don't store:**
+- ❌ Session summaries: "Today I worked on X"
+- ❌ Task completion logs: "Fixed bug in file.py", "TODO-abc completed"
+- ❌ TODO status updates: "Milestone reached", "Task refined"
+- ❌ Temporary context: "User is working on project X"
+- ❌ Duplicate skills: Don't copy skill content into memory
+- ❌ Obvious facts: "Python uses indentation" (already in skills)
 
 ---
 
