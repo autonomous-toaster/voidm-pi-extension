@@ -93,7 +93,7 @@ function checkMemoryQuality(content: string): { ok: boolean; warnings: string[] 
 	if (/TODO-[0-9a-f]{8}/i.test(content)) {
 		warnings.push("⚠ Contains TODO identifier — avoid storing task status");
 	}
-	if (/\b(milestone|completed?|finished|done|fixed)\b/i.test(content)) {
+	if (/\b(milestone|completed|finished|done|fixed)\b/i.test(content)) {
 		warnings.push("⚠ Looks like a task log — store the lesson, not the completion");
 	}
 	if (/\b(today|yesterday|this session|this morning)\b/i.test(content)) {

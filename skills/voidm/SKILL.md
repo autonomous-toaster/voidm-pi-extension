@@ -150,6 +150,45 @@ Makes the memory a concrete INSTANCE_OF the concept class.
 
 ---
 
+## Quality Warnings
+
+The tool checks memory content for anti-patterns. Warnings don't block storage—they're guidance to help you self-correct.
+
+### Detected Patterns
+
+**1. Task logs** — Regex: `\b(milestone|completed|finished|done|fixed)\b`
+- ❌ "MILESTONE: TODO-a1a0b62f Refinement Complete"
+- ❌ "All Tier 1 tasks done today"
+- ✅ "Multi-instance isolation completed the design" (acceptable context)
+
+**2. TODO identifiers** — Regex: `TODO-[0-9a-f]{8}`
+- ❌ "TODO-abc12345 fixed in refactor"
+- ❌ "See TODO-a1a0b62f for details"
+
+**3. Time markers** — Regex: `\b(today|yesterday|this session|this morning)\b`
+- ❌ "Today I worked on authentication"
+- ❌ "This session: completed 3 features"
+
+**4. Status prefixes** — Regex: `^(date|status|update):`
+- ❌ "Status: implementation ready"
+- ❌ "Date: March 7, 2026 — completed tasks"
+
+**5. Length extremes** — Content <30 chars or >300 words
+- ❌ "Done" (too short)
+- ❌ "Multi-paragraph essay about..." (too long — split it)
+
+### Interpreting Warnings
+
+If you see a warning but the memory is actually valuable:
+- You can override and store anyway (warnings are non-blocking)
+- But review the pattern — task logs rarely survive to next session
+
+Example fix: Instead of storing "MILESTONE: TODO-a1a0b62f complete", store the learned principle:
+- ❌ "MILESTONE: TODO-a1a0b62f Refinement Complete"
+- ✅ "Separation of ontology_concepts and ontology_edges prevents concept reuse issues"
+
+---
+
 ## Best Practices
 
 1. **Recall before acting** — always search before starting a task
