@@ -417,11 +417,11 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_tree",   async (_e, ctx) => reconstructCache(ctx));
 
 	// ---------------------------------------------------------------------------
-	// Auto enrich-memories on session start — silently links memories to concepts
+	// Auto-improve database on session start — enrich memories + deduplicate
 	// ---------------------------------------------------------------------------
 	pi.on("session_start", async (_e, _ctx) => {
 		// Fire-and-forget — don't block session startup, don't show output to agent
-		execVoidm(["ontology", "enrich-memories", "--add", "--json"]).catch(() => {});
+		execVoidm(["ontology", "auto-improve", "--merge-only", "--force", "--json"]).catch(() => {});
 	});
 
 	// ---------------------------------------------------------------------------
