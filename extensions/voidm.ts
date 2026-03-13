@@ -425,15 +425,44 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// ---------------------------------------------------------------------------
-	// before_agent_start — inject memory workflow reminder into system prompt
+	// Helper: Detect task type and suggest relevant user behavior query
+	// ---------------------------------------------------------------------------
+	function detectBehaviorQuery(promptHint: string): string | null {
+		const patterns: Record<string, string> = {
+			"design|architecture|schema|system": "user's approach to system design",
+			"implement|code|refactor|build": "user technical preferences and standards",
+			"test|verify|debug|validation": "user's problem-solving workflow",
+			"document|explain|analyze|summarize": "user communication style preferences",
+			"review|evaluate|improve|quality": "user code quality standards",
+		};
+
+		for (const [regex, query] of Object.entries(patterns)) {
+			if (new RegExp(regex, "i").test(promptHint)) {
+				return query;
+			}
+		}
+		return null;
+	}
+
+	// ---------------------------------------------------------------------------
+	// before_agent_start — inject memory workflow + user behavior nudge
 	// ---------------------------------------------------------------------------
 	pi.on("before_agent_start", async (e, _ctx) => {
 		const promptHint = e.prompt.replace(/\s+/g, " ").trim().slice(0, 120);
+		const behaviorSuggestion = detectBehaviorQuery(promptHint);
+
 		const reminder = [
 			"",
 			"[Memory workflow]",
 			"BEFORE starting: recall relevant context — memory action=recall query=\"<topic or tool from the task>\"",
 			`Task hint: "${promptHint}"`,
+			...(behaviorSuggestion ? [
+				"",
+				"[User Behavior Pattern]",
+				`Also helpful: memory action=recall query="${behaviorSuggestion}"`,
+				"(This recalls how you typically approach this kind of task)",
+			] : []),
+			"",
 			"AFTER completing: IF you discovered non-obvious knowledge (gotcha, decision, constraint), store it.",
 			"DON'T store: task logs, TODO status, session summaries, obvious facts.",
 			"",
