@@ -152,6 +152,7 @@ const MemoryParams = Type.Object({
 	// recall
 	query:       Type.Optional(Type.String({ description: "Search query (required for recall)" })),
 	limit:       Type.Optional(Type.Number({ description: "Max results (for recall, default 10)" })),
+	intent:      Type.Optional(Type.String({ description: "Search intent for guided expansion (for recall, optional)" })),
 
 	// relate
 	from_id:     Type.Optional(Type.String({ description: "Source memory ID or short prefix (for relate)" })),
@@ -492,7 +493,7 @@ Actions:
 
   recall     Search memories and concepts.
              Required: query.
-             Optional: scope (filter by scope prefix), limit (default 10).
+             Optional: scope (filter by scope prefix), limit (default 10), intent (for guided expansion).
              Returns: full content of matching memories + any matching ontology concepts.
              If no results, suggests a lower threshold automatically.
 
@@ -592,6 +593,7 @@ Actions:
 						const args = ["search", "--json"];
 						if (params.scope) args.push("--scope", params.scope);
 						if (params.limit) args.push("--limit", String(params.limit));
+						if (params.intent) args.push("--intent", params.intent);
 						args.push("--", params.query);
 
 						const conceptArgs = ["ontology", "concept", "list", "--json"];
@@ -774,6 +776,7 @@ Actions:
 			if (args.content) text += " " + theme.fg("dim", `"${oneLine(args.content, 40)}"`);
 			if (args.name)    text += " " + theme.fg("dim", args.name);
 			if (args.id)      text += " " + theme.fg("dim", args.id);
+			if (args.intent)  text += " " + theme.fg("accent", `intent:"${args.intent}"`);
 			if (args.memory_id && args.action === "delete") {
 				text += " " + theme.fg("dim", `[${args.memory_id.slice(0, 8)}]`);
 			}
