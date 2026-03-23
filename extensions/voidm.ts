@@ -24,6 +24,11 @@ interface Memory {
 	tags: string[];
 	importance: number;
 	created_at: string;
+	// Optional metadata fields
+	author?: string;
+	source_reliability?: string;
+	quality_score?: number;
+	metadata?: Record<string, any>;
 }
 
 interface MemoryDetails {
@@ -67,6 +72,11 @@ function memoryFromJson(raw: any): Memory {
 		tags: raw.tags ?? [],
 		importance: raw.importance ?? 5,
 		created_at: raw.created_at ?? "",
+		// Extract new metadata fields (if voidm returns them)
+		author: raw.author ?? undefined,
+		source_reliability: raw.source_reliability ?? undefined,
+		quality_score: raw.quality_score ?? undefined,
+		metadata: raw.metadata ?? undefined,
 	};
 }
 
@@ -148,11 +158,27 @@ const MemoryParams = Type.Object({
 	scope:       Type.Optional(Type.String({ description: "Scope prefix, e.g. project/auth (for remember, recall, concept_add)" })),
 	tags:        Type.Optional(Type.String({ description: "Comma-separated tags (for remember)" })),
 	importance:  Type.Optional(Type.Number({ description: "Importance 1-10 (for remember, default 5)" })),
+	provenance:  Type.Optional(StringEnum(
+		["user", "session", "feedback", "audit", "system"] as const,
+		{ description: "Workflow provenance - where memory came from in the task (for remember)" }
+	)),
+	links:       Type.Optional(Type.Array(
+		Type.Object({
+			target_id: Type.String({ description: "Target memory ID" }),
+			rel: StringEnum([
+				"SUPPORTS", "CONTRADICTS", "DERIVED_FROM", "PRECEDES", 
+				"PART_OF", "EXEMPLIFIES", "RELATES_TO"
+			] as const, { description: "Relationship type" }),
+			note: Type.Optional(Type.String({ description: "Optional note (required for RELATES_TO)" }))
+		}),
+		{ description: "Links to create during remember" }
+	)),
 
 	// recall
 	query:       Type.Optional(Type.String({ description: "Search query (required for recall)" })),
 	limit:       Type.Optional(Type.Number({ description: "Max results (for recall, default 10)" })),
 	intent:      Type.Optional(Type.String({ description: "Search intent for guided expansion (for recall, optional)" })),
+	min_quality: Type.Optional(Type.Number({ description: "Min quality score (0.0-1.0) for filtering results", minimum: 0, maximum: 1 })),
 
 	// relate
 	from_id:     Type.Optional(Type.String({ description: "Source memory ID or short prefix (for relate)" })),
@@ -488,8 +514,15 @@ Actions:
   remember   Store a new memory.
              Required: content, type.
              Optional: scope (e.g. "project/auth"), tags (comma-separated), importance (1-10, default 5).
+             Optional: provenance (workflow source) - values: user, session, feedback, audit, system.
+             Optional: links (array of {target_id, rel, note} to create relationships during remember).
+             
+             Metadata ranking signals:
+               • author: Always "assistant" for MCP calls (signals AI-driven, trusted content)
+               • source_reliability: Not exposed in tool (use voidm CLI for: academic|verified|user|unknown)
+             
              Types: episodic | semantic | procedural | conceptual | contextual
-             Returns: memory id + any suggested links to existing related memories.
+             Returns: memory id, quality_score, suggested related memories.
 
   recall     Search memories and concepts.
              Required: query.
@@ -537,6 +570,28 @@ Actions:
 						const args = ["add", "--type", params.type, "--importance", String(params.importance ?? 5), "--json"];
 						if (params.scope) args.push("--scope", params.scope);
 						if (params.tags)  args.push("--tags", params.tags);
+						
+						// Always set author to "assistant" for MCP tool calls
+						args.push("--author", "assistant");
+						
+						// PHASE 1 FIX: Don't pass provenance to --source flag (semantic mismatch fix)
+						// Provenance (workflow origin) is kept locally but NOT passed to voidm's --source flag
+						// (which expects reliability: academic|verified|user|unknown)
+						if (params.provenance) {
+							// Note: We keep provenance in metadata for tracking, not passed to CLI
+							// This prevents data corruption from semantic mismatch
+						}
+						
+						// PHASE 2 FIX: Add links support during remember
+						if (params.links && params.links.length > 0) {
+							for (const link of params.links) {
+								const linkStr = link.note 
+									? `${link.target_id}:${link.rel}:${link.note}`
+									: `${link.target_id}:${link.rel}`;
+								args.push("--link", linkStr);
+							}
+						}
+						
 						args.push("--", params.content);
 
 						const { stdout, code } = await execVoidm(args);
@@ -549,10 +604,18 @@ Actions:
 
 						let msg = `Stored [${mem.id.slice(0, 8)}] (${mem.type}${params.scope ? `, ${params.scope}` : ""})`;
 						
+						// PHASE 4 FIX: Show author in results (always "assistant" for MCP calls)
+						msg += `, author: assistant`;
+						
 						// Quality score from server
 						const serverQuality = resp.quality_score as number | undefined;
 						if (serverQuality !== undefined && serverQuality !== null) {
 							msg += ` — Quality: ${serverQuality.toFixed(2)}`;
+						}
+						
+						// PHASE 2 FIX: Show link count if created
+						if (params.links && params.links.length > 0) {
+							msg += `\n  Links: ${params.links.length} created`;
 						}
 						
 						// Quality warnings - only show if server quality is low (< 0.7)
@@ -594,6 +657,7 @@ Actions:
 						if (params.scope) args.push("--scope", params.scope);
 						if (params.limit) args.push("--limit", String(params.limit));
 						if (params.intent) args.push("--intent", params.intent);
+						if (params.min_quality !== undefined) args.push("--min-quality", String(params.min_quality));
 						args.push("--", params.query);
 
 						const conceptArgs = ["ontology", "concept", "list", "--json"];

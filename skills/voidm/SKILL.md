@@ -67,6 +67,14 @@ Search and filter by quality:
 voidm search "testing" --min-quality 0.8 --limit 10
 ```
 
+**Quality Score** (0.0–1.0): Each memory gets a quality score reflecting content clarity and structure.
+- 0.9–1.0: Excellent (well-formed, specific, complete)
+- 0.7–0.9: Good (clear intent, proper structure)
+- 0.5–0.7: Fair (understandable but could improve)
+- < 0.5: Poor (vague or incomplete)
+
+Use `--min-quality` to filter results. Default shows all results with scores visible.
+
 ### Delete a Memory
 ```bash
 voidm delete a1b2c3d4 --yes
