@@ -87,10 +87,17 @@ function err(action: string, msg: string) {
 	};
 }
 
+// Helper: format text on one line
 function oneLine(s: string, max: number): string {
 	const flat = s.replace(/\n+/g, " ").replace(/\s+/g, " ").trim();
 	return flat.length > max ? flat.slice(0, max - 1) + "…" : flat;
 }
+
+// Type colors for renderResult
+const typeColors: Record<string, ThemeColor> = {
+	episodic: "muted", semantic: "accent", procedural: "success",
+	conceptual: "warning", contextual: "muted",
+};
 
 // ---------------------------------------------------------------------------
 // Memory quality checking — anti-pattern detection
@@ -162,6 +169,10 @@ const MemoryParams = Type.Object({
 		["user", "session", "feedback", "audit", "system"] as const,
 		{ description: "Workflow provenance - where memory came from in the task (for remember)" }
 	)),
+	context:     Type.Optional(StringEnum(
+		["gotcha", "decision", "procedure", "reference"] as const,
+		{ description: "Context type for creation-time categorization (optional). Scoring boost (+0.15): gotcha→debug/optimize, decision→architecture, procedure→implement, reference→understand." }
+	)),
 	links:       Type.Optional(Type.Array(
 		Type.Object({
 			target_id: Type.String({ description: "Target memory ID" }),
@@ -173,11 +184,15 @@ const MemoryParams = Type.Object({
 		}),
 		{ description: "Links to create during remember" }
 	)),
+	author:      Type.Optional(Type.String({ description: "Author (for remember) - exposed but internal use only" })),
 
 	// recall
 	query:       Type.Optional(Type.String({ description: "Search query (required for recall)" })),
 	limit:       Type.Optional(Type.Number({ description: "Max results (for recall, default 10)" })),
-	intent:      Type.Optional(Type.String({ description: "Search intent for guided expansion (for recall, optional)" })),
+	intent:      Type.Optional(StringEnum(
+		["debug", "optimize", "implement", "understand", "architecture", "troubleshoot"] as const,
+		{ description: "Search intent for guided expansion and scoring boost (optional)" }
+	)),
 	min_quality: Type.Optional(Type.Number({ description: "Min quality score (0.0-1.0) for filtering results", minimum: 0, maximum: 1 })),
 
 	// relate
@@ -196,253 +211,12 @@ const MemoryParams = Type.Object({
 	memory_id:   Type.Optional(Type.String({ description: "Memory ID or short prefix (for link_to_concept, delete)" })),
 });
 
-// ---------------------------------------------------------------------------
-// MemoryBrowser TUI
-// ---------------------------------------------------------------------------
-
-const typeColors: Record<string, ThemeColor> = {
-	episodic: "muted", semantic: "accent", procedural: "success",
-	conceptual: "warning", contextual: "muted",
-};
-
-function trunc(s: string, w: number) { return truncateToWidth(s, w); }
-
-function wordWrap(text: string, maxWidth: number): string[] {
-	const out: string[] = [];
-	for (const para of text.split("\n")) {
-		if (para.length <= maxWidth) { out.push(para); continue; }
-		let cur = "";
-		for (const word of para.split(" ")) {
-			if (cur && (cur + " " + word).length > maxWidth) { out.push(cur); cur = word; }
-			else cur = cur ? cur + " " + word : word;
-		}
-		if (cur) out.push(cur);
-	}
-	return out;
-}
-
-function countTypes(ms: Memory[]): string {
-	const c: Record<string, number> = {};
-	for (const m of ms) c[m.type] = (c[m.type] ?? 0) + 1;
-	return Object.entries(c).map(([k, v]) => `${v} ${k}`).join(", ");
-}
-
-class MemoryBrowser {
-	private memories: Memory[];
-	private filtered: Memory[] = [];
-	private theme: Theme;
-	private onClose: () => void;
-	private execVoidm: typeof execVoidm;
-
-	private selectedIndex = 0;
-	private currentPage = 0;
-	private pageSize = 6;
-	private mode: "list" | "search-input" | "search-results" | "detail" = "list";
-	private searchQuery = "";
-	private deleteConfirm = false;
-	private deleteTimer?: ReturnType<typeof setTimeout>;
-	private dirty = true;
-	private cachedWidth?: number;
-	private cachedLines?: string[];
-
-	constructor(memories: Memory[], theme: Theme, onClose: () => void, exec: typeof execVoidm) {
-		this.memories = memories;
-		this.filtered = memories;
-		this.theme = theme;
-		this.onClose = onClose;
-		this.execVoidm = exec;
-	}
-
-	async handleInput(data: string): Promise<void> {
-		if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) {
-			if (this.deleteConfirm) { this.deleteConfirm = false; clearTimeout(this.deleteTimer); this.invalidate(); return; }
-			if (this.mode === "detail") { this.mode = "list"; this.invalidate(); return; }
-			if (this.mode === "search-input" || this.mode === "search-results") {
-				this.mode = "list"; this.searchQuery = ""; this.filtered = this.memories;
-				this.selectedIndex = 0; this.currentPage = 0; this.invalidate(); return;
-			}
-			this.onClose(); return;
-		}
-		if (this.mode === "search-input") {
-			if (matchesKey(data, "enter")) {
-				await this.runSearch(); this.mode = "search-results";
-				this.selectedIndex = 0; this.currentPage = 0; this.invalidate();
-			} else if (matchesKey(data, "backspace")) {
-				this.searchQuery = this.searchQuery.slice(0, -1); this.invalidate();
-			} else if (data.length === 1) {
-				this.searchQuery += data; this.invalidate();
-			}
-			return;
-		}
-		if (this.mode === "detail") {
-			if (matchesKey(data, "d")) {
-				this.deleteConfirm = true;
-				clearTimeout(this.deleteTimer);
-				this.deleteTimer = setTimeout(() => { this.deleteConfirm = false; this.invalidate(); }, 3000);
-				this.invalidate();
-			} else if (this.deleteConfirm && matchesKey(data, "y")) {
-				await this.doDelete(); this.mode = "list"; this.invalidate();
-			}
-			return;
-		}
-		const list = this.filtered;
-		const totalPages = Math.ceil(list.length / this.pageSize);
-		if (matchesKey(data, "down") || matchesKey(data, "j")) {
-			const pageLen = Math.min(this.pageSize, list.length - this.currentPage * this.pageSize);
-			if (this.selectedIndex < pageLen - 1) this.selectedIndex++;
-			else if (this.currentPage < totalPages - 1) { this.currentPage++; this.selectedIndex = 0; }
-			this.invalidate();
-		} else if (matchesKey(data, "up") || matchesKey(data, "k")) {
-			if (this.selectedIndex > 0) this.selectedIndex--;
-			else if (this.currentPage > 0) { this.currentPage--; this.selectedIndex = this.pageSize - 1; }
-			this.invalidate();
-		} else if (matchesKey(data, "pageDown") || matchesKey(data, "ctrl+d")) {
-			this.currentPage = Math.min(this.currentPage + 1, totalPages - 1); this.selectedIndex = 0; this.invalidate();
-		} else if (matchesKey(data, "pageUp") || matchesKey(data, "ctrl+u")) {
-			this.currentPage = Math.max(this.currentPage - 1, 0); this.selectedIndex = 0; this.invalidate();
-		} else if (matchesKey(data, "g")) {
-			this.currentPage = 0; this.selectedIndex = 0; this.invalidate();
-		} else if (data === "G") {
-			this.currentPage = Math.max(totalPages - 1, 0);
-			const lastLen = list.length - this.currentPage * this.pageSize;
-			this.selectedIndex = Math.max(Math.min(lastLen, this.pageSize) - 1, 0);
-			this.invalidate();
-		} else if (matchesKey(data, "/")) {
-			this.mode = "search-input"; this.searchQuery = ""; this.invalidate();
-		} else if (matchesKey(data, "enter") || matchesKey(data, "v")) {
-			if (list.length > 0) { this.mode = "detail"; this.invalidate(); }
-		} else if (matchesKey(data, "d")) {
-			if (list.length > 0) {
-				this.deleteConfirm = true;
-				clearTimeout(this.deleteTimer);
-				this.deleteTimer = setTimeout(() => { this.deleteConfirm = false; this.invalidate(); }, 3000);
-				this.invalidate();
-			}
-		} else if (this.deleteConfirm && matchesKey(data, "y")) {
-			await this.doDelete(); this.invalidate();
-		}
-	}
-
-	private async runSearch(): Promise<void> {
-		if (!this.searchQuery.trim()) { this.filtered = this.memories; return; }
-		const result = await this.execVoidm(["search", this.searchQuery, "--min-score", "0", "--json", "--limit", "50"]);
-		const arr = parseJson<any[]>(result.stdout);
-		this.filtered = (arr ?? []).map(memoryFromJson);
-	}
-
-	private async doDelete(): Promise<void> {
-		const mem = this.getSelected();
-		if (!mem) return;
-		await this.execVoidm(["delete", mem.id, "--yes", "--json"]);
-		this.memories = this.memories.filter(m => m.id !== mem.id);
-		this.filtered = this.filtered.filter(m => m.id !== mem.id);
-		this.deleteConfirm = false;
-		if (this.selectedIndex >= this.filtered.length && this.selectedIndex > 0) this.selectedIndex--;
-	}
-
-	private getSelected(): Memory | undefined {
-		return this.filtered[this.currentPage * this.pageSize + this.selectedIndex];
-	}
-
-	render(width: number): string[] {
-		if (!this.dirty && this.cachedWidth === width) return this.cachedLines!;
-		const th = this.theme;
-		const lines: string[] = [""];
-		if (this.mode === "search-input") {
-			lines.push(trunc(th.fg("borderMuted", "───") + th.fg("accent", " Search ") + th.fg("borderMuted", "─".repeat(Math.max(0, width - 11))), width));
-			lines.push("");
-			lines.push(trunc(`  ${th.fg("muted", "Query: ")}${th.fg("text", this.searchQuery)}${th.fg("dim", "_")}`, width));
-			lines.push("");
-			lines.push(trunc(th.fg("dim", "  Enter to search · Esc to cancel"), width));
-		} else if (this.mode === "detail") {
-			const mem = this.getSelected();
-			if (!mem) {
-				lines.push(trunc(th.fg("error", "  Memory not found"), width));
-			} else {
-				const typeColor = typeColors[mem.type] ?? "muted";
-				lines.push(trunc(th.fg("borderMuted", "───") + th.fg("accent", " Memory ") + th.fg("borderMuted", "─".repeat(Math.max(0, width - 11))), width));
-				lines.push("");
-				lines.push(trunc(`  ${th.fg(typeColor, mem.type.toUpperCase())}  ${th.fg("dim", `importance: ${mem.importance}/10`)}`, width));
-				if (mem.scopes.length) lines.push(trunc(`  ${th.fg("dim", `scopes: ${mem.scopes.join(", ")}`)}`, width));
-				if (mem.tags.length) lines.push(trunc(`  ${th.fg("dim", `tags: ${mem.tags.map(t => "#" + t).join(" ")}`)}`, width));
-				lines.push("");
-				lines.push(trunc(th.fg("borderMuted", "─".repeat(width)), width));
-				lines.push("");
-				for (const l of wordWrap(mem.content, width - 4)) lines.push(trunc(`  ${l}`, width));
-				lines.push("");
-				lines.push(trunc(th.fg("borderMuted", "─".repeat(width)), width));
-				lines.push("");
-				lines.push(trunc(th.fg("dim", `  id: ${mem.id}`), width));
-				lines.push(trunc(th.fg("dim", `  created: ${mem.created_at}`), width));
-				lines.push("");
-				lines.push(trunc(this.deleteConfirm ? th.fg("error", "  Delete? Press y to confirm") : th.fg("dim", "  d: delete · Esc: back"), width));
-			}
-		} else {
-			const label = this.mode === "search-results" ? ` Search: "${this.searchQuery}" ` : " Memories ";
-			lines.push(trunc(th.fg("borderMuted", "───") + th.fg("accent", label) + th.fg("borderMuted", "─".repeat(Math.max(0, width - label.length - 3))), width));
-			lines.push("");
-			if (this.filtered.length === 0) {
-				lines.push(trunc(`  ${th.fg("dim", "No memories.")}`, width));
-			} else {
-				const totalPages = Math.ceil(this.filtered.length / this.pageSize);
-				const pageMemories = this.filtered.slice(this.currentPage * this.pageSize, (this.currentPage + 1) * this.pageSize);
-				const counts = countTypes(this.filtered);
-				lines.push(trunc(`  ${th.fg("muted", `${this.filtered.length} total · ${counts}`)}`, width));
-				if (totalPages > 1) lines[lines.length - 1] += th.fg("dim", `  p${this.currentPage + 1}/${totalPages}`);
-				lines.push("");
-				for (let i = 0; i < pageMemories.length; i++) {
-					const mem = pageMemories[i];
-					const selected = i === this.selectedIndex;
-					const typeColor = typeColors[mem.type] ?? "muted";
-					const typeLabel = th.fg(typeColor, mem.type.slice(0, 3).toUpperCase());
-					const imp = th.fg("dim", `[${mem.importance}]`);
-					const scope = mem.scopes[0] ? th.fg("dim", ` (${mem.scopes[0]})`) : "";
-					const preview = oneLine(mem.content, width - 22);
-					const prefix = selected ? th.fg("accent", "❯ ") : "  ";
-					lines.push(trunc(`${prefix}${typeLabel} ${imp}${scope} ${th.fg(selected ? "text" : "muted", preview)}`, width));
-				}
-			}
-			lines.push("");
-			lines.push(trunc(
-				this.deleteConfirm
-					? th.fg("error", "Delete? Press y to confirm")
-					: th.fg("dim", "↑↓: nav · /: search · v: view · d: del · g/G: top/bot · Esc: close"),
-				width,
-			));
-		}
-		lines.push("");
-		this.dirty = false;
-		this.cachedWidth = width;
-		this.cachedLines = lines;
-		return lines;
-	}
-
-	invalidate() { this.dirty = true; this.cachedWidth = undefined; }
-}
 
 // ---------------------------------------------------------------------------
 // Extension entry point
 // ---------------------------------------------------------------------------
 
 export default function (pi: ExtensionAPI) {
-	let memoryCache: Memory[] = [];
-
-	const reconstructCache = (ctx: ExtensionContext) => {
-		memoryCache = [];
-		for (const entry of ctx.sessionManager.getBranch()) {
-			if (entry.type !== "message") continue;
-			const msg = entry.message;
-			if (msg.role !== "toolResult" || msg.toolName !== "memory") continue;
-			const d = msg.details as MemoryDetails | undefined;
-			if (d?.memories?.length) memoryCache = d.memories;
-		}
-	};
-
-	pi.on("session_start",  async (_e, ctx) => reconstructCache(ctx));
-	pi.on("session_switch", async (_e, ctx) => reconstructCache(ctx));
-	pi.on("session_fork",   async (_e, ctx) => reconstructCache(ctx));
-	pi.on("session_tree",   async (_e, ctx) => reconstructCache(ctx));
-
 	// ---------------------------------------------------------------------------
 	// Auto-improve database on session start — enrich memories + deduplicate
 	// ---------------------------------------------------------------------------
@@ -472,7 +246,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	// ---------------------------------------------------------------------------
-	// before_agent_start — inject memory workflow + user behavior nudge
+	// before_agent_start — inject minimal memory workflow nudge
 	// ---------------------------------------------------------------------------
 	pi.on("before_agent_start", async (e, _ctx) => {
 		const promptHint = e.prompt.replace(/\s+/g, " ").trim().slice(0, 120);
@@ -485,19 +259,11 @@ export default function (pi: ExtensionAPI) {
 			`Task hint: "${promptHint}"`,
 			...(behaviorSuggestion ? [
 				"",
-				"[User Behavior Pattern]",
-				`Also helpful: memory action=recall query="${behaviorSuggestion}"`,
-				"(This recalls how you typically approach this kind of task)",
+				"Also helpful: memory action=recall query=\"${behaviorSuggestion}\"",
 			] : []),
 			"",
 			"AFTER completing: IF you discovered non-obvious knowledge (gotcha, decision, constraint), store it.",
 			"DON'T store: task logs, TODO status, session summaries, obvious facts.",
-			"",
-			"[Quality score guidance]",
-			"When tools return memory with quality_score:",
-			"- quality_score < 0.5: BINDING RETRY — don't use this memory, prefer recall with better query",
-			"- quality_score 0.5-0.7: CHECK — verify manually before relying on it",
-			"- quality_score >= 0.7: ACCEPT — reliable for decision-making",
 		].join("\n");
 		return { systemPrompt: e.systemPrompt + "\n\n---" + reminder + "\n---" };
 	});
@@ -515,11 +281,10 @@ Actions:
              Required: content, type.
              Optional: scope (e.g. "project/auth"), tags (comma-separated), importance (1-10, default 5).
              Optional: provenance (workflow source) - values: user, session, feedback, audit, system.
+             Optional: context (creation categorization) - values: gotcha, decision, procedure, reference.
              Optional: links (array of {target_id, rel, note} to create relationships during remember).
              
-             Metadata ranking signals:
-               • author: Always "assistant" for MCP calls (signals AI-driven, trusted content)
-               • source_reliability: Not exposed in tool (use voidm CLI for: academic|verified|user|unknown)
+             Note: author is always forced to "assistant" via voidm CLI.
              
              Types: episodic | semantic | procedural | conceptual | contextual
              Returns: memory id, quality_score, suggested related memories.
@@ -527,6 +292,11 @@ Actions:
   recall     Search memories and concepts.
              Required: query.
              Optional: scope (filter by scope prefix), limit (default 10), intent (for guided expansion).
+             Optional: min_quality (0.0-1.0 threshold for filtering).
+             
+             Supported intents: debug, optimize, implement, understand, architecture, troubleshoot
+             Intent matching: Uses context parameter for scoring boost. Aligned memories score +0.15 higher.
+             
              Returns: full content of matching memories + any matching ontology concepts.
              If no results, suggests a lower threshold automatically.
 
@@ -556,6 +326,9 @@ Actions:
 		parameters: MemoryParams,
 
 		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+			// Local cache for this tool invocation (for MemoryDetails)
+			let lastMemories: Memory[] = [];
+
 			try {
 				switch (params.action) {
 
@@ -570,17 +343,11 @@ Actions:
 						const args = ["add", "--type", params.type, "--importance", String(params.importance ?? 5), "--json"];
 						if (params.scope) args.push("--scope", params.scope);
 						if (params.tags)  args.push("--tags", params.tags);
+						if (params.context) args.push("--context", params.context);
+						if (params.provenance) args.push("--provenance", params.provenance);
 						
-						// Always set author to "assistant" for MCP tool calls
+						// Always force author to "assistant" via CLI
 						args.push("--author", "assistant");
-						
-						// PHASE 1 FIX: Don't pass provenance to --source flag (semantic mismatch fix)
-						// Provenance (workflow origin) is kept locally but NOT passed to voidm's --source flag
-						// (which expects reliability: academic|verified|user|unknown)
-						if (params.provenance) {
-							// Note: We keep provenance in metadata for tracking, not passed to CLI
-							// This prevents data corruption from semantic mismatch
-						}
 						
 						// PHASE 2 FIX: Add links support during remember
 						if (params.links && params.links.length > 0) {
@@ -600,12 +367,12 @@ Actions:
 						if (!resp?.id) return err("remember", "unexpected response");
 
 						const mem = memoryFromJson(resp);
-						memoryCache = [mem, ...memoryCache.filter(m => m.id !== mem.id)];
+						lastMemories = [mem, ...lastMemories.filter(m => m.id !== mem.id)];
 
 						let msg = `Stored [${mem.id.slice(0, 8)}] (${mem.type}${params.scope ? `, ${params.scope}` : ""})`;
 						
-						// PHASE 4 FIX: Show author in results (always "assistant" for MCP calls)
-						msg += `, author: assistant`;
+						// Show author from response
+						if (resp.author) msg += `, author: ${resp.author}`;
 						
 						// Quality score from server
 						const serverQuality = resp.quality_score as number | undefined;
@@ -645,7 +412,7 @@ Actions:
 
 						return {
 							content: [{ type: "text", text: msg }],
-							details: { action: "remember", memories: [...memoryCache], message: msg } as MemoryDetails,
+							details: { action: "remember", memories: [...lastMemories], message: msg } as MemoryDetails,
 						};
 					}
 
@@ -680,7 +447,7 @@ Actions:
 						}
 
 						const memories: Memory[] = (Array.isArray(parsed) ? parsed : []).map(memoryFromJson);
-						memoryCache = memories.length ? memories : memoryCache;
+						lastMemories = memories.length ? memories : lastMemories;
 
 						// Concept match — simple substring
 						const allConcepts: any[] = parseJson<any[]>(conceptResult.stdout) ?? [];
@@ -730,7 +497,7 @@ Actions:
 						const msg = `Linked [${params.from_id.slice(0, 8)}] -[${params.rel}]→ [${params.to_id.slice(0, 8)}]`;
 						return {
 							content: [{ type: "text", text: msg }],
-							details: { action: "relate", memories: memoryCache, message: msg } as MemoryDetails,
+							details: { action: "relate", memories: lastMemories, message: msg } as MemoryDetails,
 						};
 					}
 
@@ -749,7 +516,7 @@ Actions:
 						const msg = `Concept created: ${concept.name} [${concept.id.slice(0, 8)}]${concept.description ? ` — ${concept.description}` : ""}`;
 						return {
 							content: [{ type: "text", text: msg }],
-							details: { action: "concept_add", memories: memoryCache, message: msg } as MemoryDetails,
+							details: { action: "concept_add", memories: lastMemories, message: msg } as MemoryDetails,
 						};
 					}
 
@@ -778,7 +545,7 @@ Actions:
 
 						return {
 							content: [{ type: "text", text }],
-							details: { action: "concept_get", memories: memoryCache, message: text } as MemoryDetails,
+							details: { action: "concept_get", memories: lastMemories, message: text } as MemoryDetails,
 						};
 					}
 
@@ -795,7 +562,7 @@ Actions:
 						const msg = `Memory [${params.memory_id.slice(0, 8)}] is now an instance of concept [${params.id.slice(0, 8)}]`;
 						return {
 							content: [{ type: "text", text: msg }],
-							details: { action: "link_to_concept", memories: memoryCache, message: msg } as MemoryDetails,
+							details: { action: "link_to_concept", memories: lastMemories, message: msg } as MemoryDetails,
 						};
 					}
 
@@ -811,12 +578,12 @@ Actions:
 						}
 
 						// Remove from cache
-						memoryCache = memoryCache.filter(m => !m.id.startsWith(params.memory_id));
+						lastMemories = lastMemories.filter(m => !m.id.startsWith(params.memory_id));
 
 						const msg = `Deleted memory [${params.memory_id}]`;
 						return {
 							content: [{ type: "text", text: msg }],
-							details: { action: "delete", memories: [...memoryCache], message: msg } as MemoryDetails,
+							details: { action: "delete", memories: [...lastMemories], message: msg } as MemoryDetails,
 						};
 					}
 
@@ -886,35 +653,6 @@ Actions:
 				default:
 					return new Text(theme.fg("dim", d.message ?? "done"), 0, 0);
 			}
-		},
-	});
-
-	// ---------------------------------------------------------------------------
-	// /memories command — human TUI browser
-	// ---------------------------------------------------------------------------
-	pi.registerCommand("memories", {
-		description: "Browse memories with search and navigation",
-		handler: async (_args, ctx) => {
-			if (!ctx.hasUI) {
-				ctx.ui.notify("/memories requires interactive mode", "error");
-				return;
-			}
-			ctx.ui.setStatus("voidm", "Loading memories…");
-			const result = await execVoidm(["list", "--json", "--limit", "200"]);
-			ctx.ui.setStatus("voidm", undefined);
-			const parsed = parseJson<any[]>(result.stdout) ?? [];
-			const memories = parsed.map(memoryFromJson);
-
-			await ctx.ui.custom<void>((tui, theme, _kb, done) => {
-				const browser = new MemoryBrowser(memories, theme, done, execVoidm);
-				return {
-					render(width: number) { return browser.render(width); },
-					invalidate() { browser.invalidate(); },
-					handleInput(data: string) {
-						browser.handleInput(data).then(() => tui.requestRender());
-					},
-				};
-			});
 		},
 	});
 }
