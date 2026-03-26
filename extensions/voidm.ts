@@ -24,6 +24,7 @@ interface Memory {
 	tags: string[];
 	importance: number;
 	created_at: string;
+	title?: string;
 	// Optional metadata fields
 	author?: string;
 	source_reliability?: string;
@@ -72,6 +73,7 @@ function memoryFromJson(raw: any): Memory {
 		tags: raw.tags ?? [],
 		importance: raw.importance ?? 5,
 		created_at: raw.created_at ?? "",
+		title: raw.title ?? undefined,
 		// Extract new metadata fields (if voidm returns them)
 		author: raw.author ?? undefined,
 		source_reliability: raw.source_reliability ?? undefined,
@@ -96,8 +98,17 @@ function oneLine(s: string, max: number): string {
 // Type colors for renderResult
 const typeColors: Record<string, ThemeColor> = {
 	episodic: "muted", semantic: "accent", procedural: "success",
-	conceptual: "warning", contextual: "muted",
+	conceptual: "warning", contextual: "error",
 };
+
+// 4-character type badges for display
+function getTypePrefix(type: string): string {
+	const prefixes: Record<string, string> = {
+		episodic: "EPIS", semantic: "SEMA", procedural: "PROC",
+		conceptual: "CONC", contextual: "CONT",
+	};
+	return prefixes[type] ?? "UNKN";
+}
 
 // ---------------------------------------------------------------------------
 // Memory quality checking — anti-pattern detection
@@ -165,6 +176,7 @@ const MemoryParams = Type.Object({
 	scope:       Type.Optional(Type.String({ description: "Scope prefix, e.g. project/auth (for remember, recall, concept_add)" })),
 	tags:        Type.Optional(Type.String({ description: "Comma-separated tags (for remember)" })),
 	importance:  Type.Optional(Type.Number({ description: "Importance 1-10 (for remember, default 5)" })),
+	title:       Type.Optional(Type.String({ description: "Brief title/summary (max 200 characters, optional for remember)" })),
 	provenance:  Type.Optional(StringEnum(
 		["user", "session", "feedback", "audit", "system"] as const,
 		{ description: "Workflow provenance - where memory came from in the task (for remember)" }
@@ -222,7 +234,7 @@ export default function (pi: ExtensionAPI) {
 	// ---------------------------------------------------------------------------
 	pi.on("session_start", async (_e, _ctx) => {
 		// Fire-and-forget — don't block session startup, don't show output to agent
-		execVoidm(["ontology", "auto-improve", "--merge-only", "--force", "--json"]).catch(() => {});
+		execVoidm(["consolidate", "--force", "--json"]).catch(() => {});
 	});
 
 	// ---------------------------------------------------------------------------
@@ -343,6 +355,7 @@ Actions:
 						const args = ["add", "--type", params.type, "--importance", String(params.importance ?? 5), "--json"];
 						if (params.scope) args.push("--scope", params.scope);
 						if (params.tags)  args.push("--tags", params.tags);
+						if (params.title) args.push("--title", params.title);
 						if (params.context) args.push("--context", params.context);
 						if (params.provenance) args.push("--provenance", params.provenance);
 						
@@ -624,8 +637,9 @@ Actions:
 					const mem = d.memories?.[0];
 					if (!mem) return new Text(theme.fg("muted", d.message ?? "stored"), 0, 0);
 					const col = typeColors[mem.type] ?? "muted";
-					let t = theme.fg("success", "✓ ") + theme.fg(col, mem.type.slice(0, 3).toUpperCase());
+					let t = theme.fg("success", "✓ ") + theme.fg(col, getTypePrefix(mem.type));
 					t += " " + theme.fg("dim", `[${mem.id.slice(0, 8)}]`);
+					if (mem.title) t += " " + theme.fg("text", `"${mem.title}"`);
 					if (expanded) t += "\n" + theme.fg("muted", oneLine(mem.content, 80));
 					return new Text(t, 0, 0);
 				}
@@ -635,7 +649,9 @@ Actions:
 					const show = expanded ? d.memories : d.memories.slice(0, 3);
 					for (const m of show) {
 						const col = typeColors[m.type] ?? "muted";
-						t += `\n${theme.fg(col, m.type.slice(0, 3).toUpperCase())} ${theme.fg("dim", `[${m.importance}]`)} ${theme.fg("text", oneLine(m.content, 60))}`;
+						const prefix = theme.fg(col, getTypePrefix(m.type));
+						const titlePart = m.title ? ` "${theme.fg("text", m.title)}"` : "";
+						t += `\n${prefix} ${theme.fg("dim", `[${m.importance}]`)} ${titlePart}${m.title ? "" : theme.fg("text", oneLine(m.content, 50))}`;
 					}
 					if (!expanded && d.memories.length > 3) t += `\n${theme.fg("dim", `… ${d.memories.length - 3} more`)}`;
 					return new Text(t, 0, 0);
