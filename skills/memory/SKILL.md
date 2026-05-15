@@ -5,12 +5,12 @@ description: "Store and recall knowledge across sessions with persistent memory 
 
 # Memory Tool — Persistent Knowledge
 
-Use the `memory` tool to store facts, recall context, and build a searchable knowledge graph. Hybrid search (vector + BM25 + fuzzy), quality scoring, and lightweight ontology.
+Use the `memory` tool to store facts, recall context, and build a searchable knowledge graph. Hybrid search (vector + BM25 + fuzzy), quality scoring, and graph linking.
 
 ## The Workflow
 
 1. **Recall before task**: `action=recall, query="<topic>"`
-2. **During task**: Create concepts if needed with `action=concept_add`
+2. **During task**: Search and link related memories
 3. **After task**: Store lessons with `action=remember`
 4. **Link knowledge**: Connect related memories with `action=relate`
 
@@ -22,9 +22,10 @@ action=recall
 query="<topic or tech>"
 scope="project/name"    # Optional: filter by scope
 limit=5                 # Optional: max results
+intent=debug            # Optional: scoring boost for intent
 ```
 
-Returns memories + matching concepts. Try broader queries if no results.
+Returns memories with hybrid scores. Try broader queries if no results.
 
 ### Store Knowledge
 ```
@@ -34,6 +35,9 @@ type=semantic           # semantic | procedural | conceptual | episodic | contex
 importance=8            # 1-10 (default 5)
 scope="project/auth"    # Optional: organize by scope
 tags="pattern,cache"    # Optional: comma-separated tags
+provenance=session      # Optional: user, session, feedback, audit, system
+context=gotcha          # Optional: gotcha, decision, procedure, reference
+title="Brief summary"   # Optional: max 200 chars
 ```
 
 Quality score (0.0-1.0) returned. < 0.5 = retry with better content.
@@ -47,36 +51,15 @@ to_id="memory-2"
 note="why they relate"  # Required for RELATES_TO only
 ```
 
+Short IDs work. If ambiguous, the tool will ask for more characters.
+
 ### Delete Bad Memory
 ```
 action=delete
 memory_id="bad-id"
 ```
 
-### Create Concept (Ontology)
-```
-action=concept_add
-name="AuthService"
-description="JWT tokens and session validation"
-scope="project/auth"    # Optional
-```
-
-### Link Memory to Concept
-```
-action=link_to_concept
-memory_id="mem-id"
-id="concept-id"
-```
-
-Now recalls of "AuthService" show all linked memories.
-
-### Get Concept Details
-```
-action=concept_get
-id="concept-id"
-```
-
-Returns name, description, hierarchy (IS_A), and linked instances.
+Full ID or prefix (min 8 chars). Prefix deletes all matching with `--yes` flag.
 
 ## Memory Types
 
@@ -116,8 +99,7 @@ Server computes quality (0.0-1.0) based on: genericity, abstraction, temporal in
 2. **Use scopes** — `scope="project/auth"` keeps memories organized
 3. **Link related memories** — creates knowledge graph, helps discovery
 4. **Be generous with importance** — 8-10 for critical, 1-3 for nice-to-know
-5. **Define concepts** — create for major services/modules, link instances
-6. **Respect quality < 0.5** — it's a retry signal, rewrite for genericity
+5. **Respect quality < 0.5** — it's a retry signal, rewrite for genericity
 
 ## Examples
 
@@ -149,28 +131,12 @@ scope="project/auth"
 limit=3
 ```
 
-### Create Architecture Concept
-```
-action=concept_add
-name="JWT"
-description="Stateless auth using JSON Web Tokens with 1hr expiry"
-scope="project/auth"
-```
-
-### Link Memory to Concept
-```
-action=link_to_concept
-memory_id="<memory-id>"
-id="<jwt-concept-id>"
-```
-
 ### Connect Two Memories
 ```
 action=relate
 from_id="<testing-memory-id>"
 rel=SUPPORTS
 to_id="<separation-memory-id>"
-note="Separated validation enables independent testing"
 ```
 
 ## Debugging
@@ -179,6 +145,7 @@ note="Separated validation enables independent testing"
 - Try single keywords instead of phrases
 - Check scope filter isn't too narrow
 - Use broader query
+- Lower `min_score` to 0.5 temporarily
 
 **Quality score too low?**
 - Remove "I", "we", "my"
@@ -186,10 +153,7 @@ note="Separated validation enables independent testing"
 - Write as principle, not action
 - Add more substance (50+ words)
 
-**Want to browse all memories?**
-- Use `/memories` command in pi for interactive TUI browser
-
 ## See Also
 
-- **voidm cli-reference** skill: Complete CLI command reference for humans
+- **voidm** skill: Complete CLI command reference
 - **voidm** repo: github.com/autonomous-toaster/voidm

@@ -7,7 +7,7 @@ description: "voidm CLI command reference for advanced operations and automation
 
 Practical CLI guide for direct memory management, graph exploration, and high-signal retrieval.
 
-**Environment**: Set `VOIDM_DB=/custom/path/memories.db` to use non-default database.
+**Environment**: Set `VOIDM_BIN` to override binary path if not in `~/.local/bin/voidm`.
 
 ---
 
@@ -20,7 +20,6 @@ voidm add "Docker separates app from OS" --type semantic --importance 8
 # Output:
 # Added memory: a1b2c3d4-...
 # Type: semantic  Importance: 8
-# Quality: 0.85
 ```
 
 With all options:
@@ -29,7 +28,10 @@ voidm add "Pattern: validate before store" \
   --type semantic \
   --importance 9 \
   --scope project/auth \
-  --tags "pattern,testing"
+  --tags "pattern,testing" \
+  --provenance session \
+  --context gotcha \
+  --title "Validation before storage"
 ```
 
 ### Get a Memory
@@ -67,6 +69,14 @@ Search and filter by quality:
 voidm search "testing" --min-quality 0.8 --limit 10
 ```
 
+Search modes:
+```bash
+voidm search "docker" --mode bm25        # pure keyword
+voidm search "docker" --mode fuzzy       # typo-tolerant
+voidm search "docker" --mode semantic    # vector similarity
+voidm search "docker" --mode vector      # chunk-level ANN
+```
+
 **Quality Score** (0.0–1.0): Each memory gets a quality score reflecting content clarity and structure.
 - 0.9–1.0: Excellent (well-formed, specific, complete)
 - 0.7–0.9: Good (clear intent, proper structure)
@@ -100,9 +110,19 @@ voidm link <memory-1> SUPPORTS <memory-2>
 voidm link <memory-1> RELATES_TO <memory-2> --note "same subsystem"
 ```
 
+### Unlink Memories
+```bash
+voidm unlink <memory-1> RELATES_TO <memory-2>
+```
+
 ### Explore Neighbors
 ```bash
 voidm graph neighbors <memory-id> --depth 2
+```
+
+### Find Shortest Path
+```bash
+voidm graph path <from-id> <to-id>
 ```
 
 ### Read-Only Cypher (Neo4j backend)
@@ -112,114 +132,17 @@ voidm graph cypher "MATCH (m:Memory) RETURN m.id as id, m.title as title LIMIT 1
 
 ---
 
-## Ontology Relations
+## Maintenance
 
-Link two memories or memory-to-concept with typed edges:
-
+### Repair Data Quality
 ```bash
-# Semantic relations
-voidm link memory-1 SUPPORTS memory-2
-voidm link memory-1 CONTRADICTS memory-2
-voidm link memory-1 DERIVED_FROM memory-2
-voidm link memory-1 PRECEDES memory-2
-voidm link memory-1 PART_OF memory-2
-voidm link memory-1 EXEMPLIFIES memory-2
-voidm link memory-1 RELATES_TO memory-2 --note "Reason they relate"
-
-# Memory to concept
-voidm ontology link memory-id INSTANCE_OF concept-id
-
-# Concept hierarchy
-voidm ontology link concept-1 IS_A concept-2
-```
-
----
-
-## Graph — Explore & Export
-
-### Export Ontology as DOT (Graphviz)
-```bash
-voidm ontology graph export --format dot > graph.dot
-dot -Tsvg graph.dot -o graph.svg
-
-# Generates Graphviz-compatible format for visualization
-```
-
-### Export as Interactive HTML
-```bash
-voidm ontology graph export --format html > graph.html
-open graph.html
-
-# Browser-based force-directed graph with search and filtering
-```
-
-### Export as JSON
-```bash
-voidm ontology graph export --format json | jq '.nodes | length'
-
-# Output: 185
-# (Shows 185 concept nodes in JSON format)
-```
-
-### Export as CSV (Edge List)
-```bash
-voidm ontology graph export --format csv > edges.csv
-
-# Columns: source_id,source_name,rel_type,target_id,target_name
-# For analysis in spreadsheet tools
-```
-
-### Query with Cypher (EAV Model)
-
-The graph uses labeled property graph with `:Memory` and `:Concept` labels:
-
-```bash
-# Find all instances of a concept
-voidm ontology query "MATCH (m:Memory)-[:INSTANCE_OF]->(c:Concept {name: 'JWT'}) RETURN m.content"
-
-# Find concept hierarchy
-voidm ontology query "MATCH (c:Concept)-[:IS_A*]->(parent:Concept) RETURN c.name, parent.name"
-
-# Find related memories (transitive)
-voidm ontology query "MATCH (m1:Memory)-[:SUPPORTS|DERIVED_FROM|EXEMPLIFIES*]->(m2:Memory) RETURN m1, m2"
-
-# Find contradictions
-voidm ontology query "MATCH (m1:Memory)-[:CONTRADICTS]->(m2:Memory) RETURN m1.content, m2.content"
-
-# Find concepts with most instances
-voidm ontology query "MATCH (c:Concept)<-[:INSTANCE_OF]-(m:Memory) RETURN c.name, count(m) as count ORDER BY count DESC"
-```
-
----
-
-## Merge History & Rollback
-
-### View Merge History
-```bash
-voidm ontology concept merge-history
+voidm repair --orphans-only
 
 # Output:
-# Merge History:
-# ──────────────────────────────────
-# [batch-id] 1234/5678 | 12 edges | status: completed
-#       At: 2026-03-08T09:00:00
+# ✓ Removed 3 orphaned chunk(s)
 ```
 
-Filter by status:
-```bash
-voidm ontology concept merge-history --status failed
-voidm ontology concept merge-history --batch batch-id
-```
-
-### Rollback a Merge
-```bash
-voidm ontology concept rollback-merge merge-log-id
-
-# Output:
-# ✓ Rolled back merge [abc123]
-# ✓ Restored source concept
-# ✓ Retargeted 5 edges
-```
+Runs silently on every session start via the extension. Fast, no model loading.
 
 ---
 
@@ -230,19 +153,18 @@ voidm ontology concept rollback-merge merge-log-id
 voidm stats
 
 # Output:
-# Memory Statistics:
-# ─────────────────
-# Total memories: 345
+# Memories:  345 total
 #   semantic: 120
 #   procedural: 85
 #   episodic: 95
 #   conceptual: 35
 #   contextual: 10
 #
-# Graph Statistics:
-# Total concepts: 181
-# Total edges: 456
-# Average edges per concept: 2.5
+# Scopes:  42
+# Graph:   5240 nodes, 8150 edges
+#   MENTIONS      2750
+#   HAS_TAG       2720
+#   HAS_CHUNK     1270
 ```
 
 ---
@@ -250,14 +172,12 @@ voidm stats
 ## Configuration
 
 ### Default Paths
-- Database: `~/.local/share/voidm/memories.db`
+- Database: Neo4j bolt://localhost:7687 (configured in `~/.config/voidm/config.toml`)
 - Config: `~/.config/voidm/config.toml`
 
-### Override Database
+### Override Config
 ```bash
-VOIDM_DB=/custom/db.sqlite voidm list
-
-# All commands respect VOIDM_DB environment variable
+VOIDM_CONFIG=/custom/path.toml voidm list
 ```
 
 ---
@@ -270,29 +190,14 @@ VOIDM_DB=/custom/db.sqlite voidm list
 voidm add "Docker isolates apps from OS" --type semantic --importance 8 --tags docker,containers
 voidm add "Kubernetes orchestrates containers at scale" --type semantic --importance 8 --tags kubernetes,containers
 
-# 2. Link memories to each other
+# 2. Link memories
 voidm link <memory-1> SUPPORTS <memory-2>
 
 # 3. Search with stricter threshold
 voidm search "container" --min-score 0.7 --limit 5
 
-# 4. Export graph
-voidm graph export --format html > graph.html
-```
-
-### Batch Operations
-```bash
-# Find candidates
-voidm ontology concept find-merge-candidates --threshold 0.90 --output plan.json
-
-# Preview merges
-voidm ontology concept merge-batch --from plan.json
-
-# Execute
-voidm ontology concept merge-batch --from plan.json --execute
-
-# View results
-voidm ontology concept merge-history
+# 4. Explore graph
+voidm graph neighbors <memory-id> --depth 1
 ```
 
 ---
@@ -308,18 +213,10 @@ voidm search "topic" --min-score 0.5 --min-quality 0.0 --limit 10
 voidm search "word" --min-score 0.7 --limit 10
 ```
 
-**Bad merge?**
+**Link/unlink failing?**
 ```bash
-# Find the merge ID from history
-voidm ontology concept merge-history | grep <concept>
-
-# Rollback it
-voidm ontology concept rollback-merge <merge-id>
-```
-
-**See all concepts and their state**
-```bash
-voidm ontology concept list --json | jq '.[] | {name, edges: .edge_count}'
+# Check existing edges
+voidm graph neighbors <memory-id> --depth 1
 ```
 
 ---
@@ -329,4 +226,3 @@ voidm ontology concept list --json | jq '.[] | {name, edges: .edge_count}'
 - **memory** skill: Memory tool usage guide for agents
 - **voidm** repo: github.com/autonomous-toaster/voidm
 - Cypher docs: Property graph query language
-
