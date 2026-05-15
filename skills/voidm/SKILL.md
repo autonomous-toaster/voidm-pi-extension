@@ -5,7 +5,7 @@ description: "voidm CLI command reference for advanced operations and automation
 
 # voidm CLI Reference
 
-Complete CLI guide for direct memory management, ontology operations, graph exploration, and database optimization.
+Practical CLI guide for direct memory management, graph exploration, and high-signal retrieval.
 
 **Environment**: Set `VOIDM_DB=/custom/path/memories.db` to use non-default database.
 
@@ -47,7 +47,7 @@ voidm get a1b2c3d4 --json
 
 ### Search Memories
 ```bash
-voidm search "docker container" --limit 5
+voidm search "docker container" --limit 5 --min-score 0.7
 
 # Output:
 # [semantic] [a1b2c3d4] imp:8
@@ -73,7 +73,7 @@ voidm search "testing" --min-quality 0.8 --limit 10
 - 0.5–0.7: Fair (understandable but could improve)
 - < 0.5: Poor (vague or incomplete)
 
-Use `--min-quality` to filter results. Default shows all results with scores visible.
+Use `--min-quality` and especially `--min-score` to keep low-signal results out of agent context. Prefer `--min-score 0.7` or higher unless you explicitly want broad recall.
 
 ### Delete a Memory
 ```bash
@@ -92,130 +92,22 @@ voidm list --limit 20 --json
 
 ---
 
-## Ontology — Concepts & Relations
+## Graph Operations
 
-### Add a Concept
+### Link Memories
 ```bash
-voidm ontology concept add "Docker"
-
-# Output:
-# Concept added: Docker (c1d2e3f4)
+voidm link <memory-1> SUPPORTS <memory-2>
+voidm link <memory-1> RELATES_TO <memory-2> --note "same subsystem"
 ```
 
-With description:
+### Explore Neighbors
 ```bash
-voidm ontology concept add "JWT" \
-  --description "Stateless auth via JSON Web Tokens" \
-  --scope project/auth
-
-# Output:
-# Concept added: JWT [c1d2e3f4] — Stateless auth...
+voidm graph neighbors <memory-id> --depth 2
 ```
 
-### Get a Concept
+### Read-Only Cypher (Neo4j backend)
 ```bash
-voidm ontology concept get c1d2e3f4
-
-# Output:
-# [c1d2e3f4] JWT
-#   Stateless auth via JSON Web Tokens
-#   Instances (3):
-#     [mem-1] "JWT with 1hr expiry..."
-#     [mem-2] "JWT refresh token pattern..."
-```
-
-### List All Concepts
-```bash
-voidm ontology concept list --limit 50 --json
-
-# Shows: all concepts, optionally scoped
-```
-
-### Link Memory to Concept
-```bash
-voidm ontology link mem-id INSTANCE_OF concept-id
-
-# Output:
-# Linked [mem-id] -[INSTANCE_OF]→ [concept-id]
-```
-
-### Link Two Concepts (Hierarchy)
-```bash
-voidm ontology link concept-1 IS_A concept-2
-
-# Output:
-# Linked [concept-1] -[IS_A]→ [concept-2]
-```
-
-### Auto-Merge Duplicate Concepts
-```bash
-voidm ontology concept auto-merge --threshold 0.85
-
-# Output:
-# Auto-Merge Preview:
-# Found 2 duplicate concept pairs above 85% similarity
-#
-# 1. [abc] Docker (0 edges) → [def] Dockerfiles (0 edges)
-#    Similarity: 90.9%
-#
-# Execute merge with: voidm ontology concept auto-merge --threshold 0.85 --force
-```
-
-Force execute (actually merge):
-```bash
-voidm ontology concept auto-merge --threshold 0.85 --force
-
-# Output:
-# Auto-Merge Complete:
-# ✓ Batch ID: 12345...
-# ✓ Merged: 2/2 concept pairs
-# Edges retargeted: 0
-#
-# Database improved. Run again to check for more duplicates.
-```
-
-### Find Merge Candidates
-```bash
-voidm ontology concept find-merge-candidates --threshold 0.90 --output candidates.json
-
-# Outputs JSON file with similar concept pairs for review
-```
-
-### One-Command Database Cleanup
-```bash
-voidm ontology auto-improve --merge-only --force
-
-# Output:
-# Auto-Improve: Merging duplicate concepts
-# Step 1: Auto-merging similar concepts...
-# ✓ Merged 5 concept pairs
-#
-# ✓ Database deduplicated
-```
-
-With enrichment (slower):
-```bash
-voidm ontology auto-improve --threshold 0.90
-
-# Enriches memories (NER extraction) then merges duplicates
-```
-
-### Enrich Memories (NER + Auto-Dedup)
-```bash
-voidm ontology enrich-memories
-
-# Step 1: Extract entities from memory text
-# [1/10] "Docker is a container..." → linked: Docker | created: Containerization
-# [2/10] "Kubernetes orchestrates..." → linked: Docker | created: Kubernetes
-# ...
-# Done: 10/10 processed, 2 links created, 2 concepts created.
-# Auto-deduplicating newly created concepts...
-# ✓ Deduplicated 1 concept pairs
-```
-
-With scope:
-```bash
-voidm ontology enrich-memories --scope project/auth --force
+voidm graph cypher "MATCH (m:Memory) RETURN m.id as id, m.title as title LIMIT 10"
 ```
 
 ---
@@ -375,27 +267,17 @@ VOIDM_DB=/custom/db.sqlite voidm list
 ### Complete Workflow
 ```bash
 # 1. Add memories
-voidm add "Docker isolates apps from OS" --type semantic --importance 8
-voidm add "Kubernetes orchestrates containers at scale" --type semantic --importance 8
+voidm add "Docker isolates apps from OS" --type semantic --importance 8 --tags docker,containers
+voidm add "Kubernetes orchestrates containers at scale" --type semantic --importance 8 --tags kubernetes,containers
 
-# 2. Create concepts
-voidm ontology concept add "Docker" --description "Container engine"
-voidm ontology concept add "Kubernetes" --description "Container orchestration"
-
-# 3. Link memory to concept
-voidm ontology link <memory-id> INSTANCE_OF <docker-concept-id>
-
-# 4. Link memories to each other
+# 2. Link memories to each other
 voidm link <memory-1> SUPPORTS <memory-2>
 
-# 5. Search
-voidm search "container"
+# 3. Search with stricter threshold
+voidm search "container" --min-score 0.7 --limit 5
 
-# 6. Clean up duplicates
-voidm ontology auto-improve --merge-only --force
-
-# 7. Export
-voidm ontology graph export --format html > graph.html
+# 4. Export graph
+voidm graph export --format html > graph.html
 ```
 
 ### Batch Operations
@@ -420,10 +302,10 @@ voidm ontology concept merge-history
 **No results on search?**
 ```bash
 # Try lower threshold
-voidm search "topic" --min-quality 0.0 --limit 20
+voidm search "topic" --min-score 0.5 --min-quality 0.0 --limit 10
 
-# Or broader term
-voidm search "word" --limit 10
+# Or broader term, but keep a threshold
+voidm search "word" --min-score 0.7 --limit 10
 ```
 
 **Bad merge?**

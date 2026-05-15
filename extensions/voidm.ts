@@ -33,7 +33,7 @@ interface Memory {
 }
 
 interface MemoryDetails {
-	action: "remember" | "recall" | "relate" | "concept_add" | "concept_get" | "link_to_concept" | "delete";
+	action: "remember" | "recall" | "relate" | "delete";
 	memories: Memory[];
 	error?: string;
 	message?: string;
@@ -159,11 +159,8 @@ function checkMemoryQuality(content: string): { ok: boolean; warnings: string[] 
 const MemoryParams = Type.Object({
 	action: StringEnum([
 		"remember",       // store a memory
-		"recall",         // search memories + concepts
+		"recall",         // search memories
 		"relate",         // link two memories
-		"concept_add",    // define a concept (ontology class node)
-		"concept_get",    // inspect a concept + its linked memories
-		"link_to_concept",// attach a memory to a concept
 		"delete",         // delete a memory by ID
 	] as const),
 
@@ -173,7 +170,7 @@ const MemoryParams = Type.Object({
 		["episodic", "semantic", "procedural", "conceptual", "contextual"] as const,
 		{ description: "Memory type (required for remember)" }
 	)),
-	scope:       Type.Optional(Type.String({ description: "Scope prefix, e.g. project/auth (for remember, recall, concept_add)" })),
+	scope:       Type.Optional(Type.String({ description: "Scope prefix, e.g. project/auth (for remember, recall)" })),
 	tags:        Type.Optional(Type.String({ description: "Comma-separated tags (for remember)" })),
 	importance:  Type.Optional(Type.Number({ description: "Importance 1-10 (for remember, default 5)" })),
 	title:       Type.Optional(Type.String({ description: "Brief title/summary (max 200 characters, optional for remember)" })),
@@ -216,11 +213,9 @@ const MemoryParams = Type.Object({
 	to_id:       Type.Optional(Type.String({ description: "Target memory ID or short prefix (for relate)" })),
 	note:        Type.Optional(Type.String({ description: "Optional note, required when rel=RELATES_TO" })),
 
-	// concept_add / concept_get / link_to_concept / delete
-	id:          Type.Optional(Type.String({ description: "Concept ID or short prefix (for concept_get, link_to_concept)" })),
-	name:        Type.Optional(Type.String({ description: "Concept name (for concept_add)" })),
-	description: Type.Optional(Type.String({ description: "Concept description (for concept_add)" })),
-	memory_id:   Type.Optional(Type.String({ description: "Memory ID or short prefix (for link_to_concept, delete)" })),
+	// delete / recall
+	memory_id:   Type.Optional(Type.String({ description: "Memory ID or short prefix (for delete)" })),
+	min_score:   Type.Optional(Type.Number({ description: "Min retrieval score (0.0-1.0). Prefer 0.7+ for agent recall.", minimum: 0, maximum: 1 })),
 });
 
 
@@ -229,14 +224,6 @@ const MemoryParams = Type.Object({
 // ---------------------------------------------------------------------------
 
 export default function (pi: ExtensionAPI) {
-	// ---------------------------------------------------------------------------
-	// Auto-improve database on session start — enrich memories + deduplicate
-	// ---------------------------------------------------------------------------
-	pi.on("session_start", async (_e, _ctx) => {
-		// Fire-and-forget — don't block session startup, don't show output to agent
-		execVoidm(["consolidate", "--force", "--json"]).catch(() => {});
-	});
-
 	// ---------------------------------------------------------------------------
 	// Helper: Detect task type and suggest relevant user behavior query
 	// ---------------------------------------------------------------------------
@@ -286,54 +273,30 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "memory",
 		label: "Memory",
-		description: `Persistent memory across sessions. Store facts, recall context, define concepts.
+		description: `Persistent memory across sessions. Store facts, recall relevant context, and link memories.
 
 Actions:
   remember   Store a new memory.
              Required: content, type.
-             Optional: scope (e.g. "project/auth"), tags (comma-separated), importance (1-10, default 5).
-             Optional: provenance (workflow source) - values: user, session, feedback, audit, system.
-             Optional: context (creation categorization) - values: gotcha, decision, procedure, reference.
-             Optional: links (array of {target_id, rel, note} to create relationships during remember).
-             
-             Note: author is always forced to "assistant" via voidm CLI.
-             
-             Types: episodic | semantic | procedural | conceptual | contextual
-             Returns: memory id, quality_score, suggested related memories.
+             Optional: scope, tags, importance, title, provenance, context, links.
+             Author is forced to "assistant" via the CLI wrapper.
 
-  recall     Search memories and concepts.
+  recall     Search memories.
              Required: query.
-             Optional: scope (filter by scope prefix), limit (default 10), intent (for guided expansion).
-             Optional: min_quality (0.0-1.0 threshold for filtering).
-             
-             Supported intents: debug, optimize, implement, understand, architecture, troubleshoot
-             Intent matching: Uses context parameter for scoring boost. Aligned memories score +0.15 higher.
-             
-             Returns: full content of matching memories + any matching ontology concepts.
-             If no results, suggests a lower threshold automatically.
+             Optional: scope, limit, intent, min_quality, min_score.
+             Prefer min_score >= 0.75 to avoid low-signal context pollution.
 
   relate     Link two memories with a typed relationship.
-             Required: from_id, rel, to_id. All IDs accept short prefix (min 4 chars).
+             Required: from_id, rel, to_id.
              Optional: note (required when rel=RELATES_TO).
-             Rels: SUPPORTS | CONTRADICTS | DERIVED_FROM | PRECEDES | PART_OF | EXEMPLIFIES | RELATES_TO
+             Short prefixes work, but if ambiguous, use full IDs to avoid bulk operations.
 
-  delete     Delete a memory by ID.
-             Required: memory_id (ID or short prefix).
-             Use with caution - only delete duplicates or low-quality memories flagged by warnings.
-
-── Ontology ────────────────────────────────────────────────────────────────────
-
-  concept_add      Define a concept (class/category node).
-                   Required: name. Optional: description, scope.
-                   Example: name="AuthService", description="Handles JWT + OAuth2"
-
-  concept_get      Get a concept by ID or short prefix.
-                   Required: id.
-                   Returns: name, description, IS_A parents, subclasses, and linked memory instances.
-
-  link_to_concept  Attach a memory to a concept via INSTANCE_OF.
-                   Required: memory_id, id (concept id or short prefix).
-                   Makes the memory a concrete instance of that concept class.`,
+  delete     Delete memory by ID or prefix (min 8 characters for prefix).
+             Required: memory_id.
+             Behavior:
+             - Full ID: deletes that single memory
+             - Prefix (8+ chars): deletes all matching memories (with --yes flag)
+             Example: memory action=delete memory_id=mem_12345678`,
 
 		parameters: MemoryParams,
 
@@ -376,7 +339,8 @@ Actions:
 
 						const { stdout, code } = await execVoidm(args);
 						if (code !== 0) return err("remember", parseJson<any>(stdout)?.error ?? stdout);
-						const resp = parseJson<any>(stdout);
+						const rawResp = parseJson<any>(stdout);
+						const resp = rawResp.result;
 						if (!resp?.id) return err("remember", "unexpected response");
 
 						const mem = memoryFromJson(resp);
@@ -436,62 +400,42 @@ Actions:
 						const args = ["search", "--json"];
 						if (params.scope) args.push("--scope", params.scope);
 						if (params.limit) args.push("--limit", String(params.limit));
-						if (params.intent) args.push("--intent", params.intent);
 						if (params.min_quality !== undefined) args.push("--min-quality", String(params.min_quality));
+						if (params.intent) args.push("--intent", params.intent);
+						args.push("--min-score", String(params.min_score ?? 0.75));
 						args.push("--", params.query);
 
-						const conceptArgs = ["ontology", "concept", "list", "--json"];
-						if (params.scope) conceptArgs.push("--scope", params.scope);
-
-						const [memResult, conceptResult] = await Promise.all([
-							execVoidm(args),
-							execVoidm(conceptArgs),
-						]);
-
+						const memResult = await execVoidm(args);
 						const parsed = parseJson<any>(memResult.stdout);
+						if (memResult.code !== 0) return err("recall", parsed?.error ?? memResult.stdout);
 
-						// Empty result with threshold info
-						if (parsed && !Array.isArray(parsed) && "results" in parsed) {
-							const hint = parsed.hint ?? `No results above threshold. Best score: ${parsed.best_score}`;
+						const rawResults = Array.isArray(parsed)
+							? parsed
+							: Array.isArray(parsed?.results)
+								? parsed.results
+								: [];
+						const memories: Memory[] = rawResults.map(memoryFromJson);
+						lastMemories = memories.length ? memories : lastMemories;
+
+						if (!memories.length) {
+							const hint = parsed?.best_score !== undefined
+								? `No memories found above threshold. Best score: ${parsed.best_score}`
+								: `No memories found for "${params.query}".`;
 							return {
 								content: [{ type: "text", text: hint }],
 								details: { action: "recall", memories: [], message: hint } as MemoryDetails,
 							};
 						}
 
-						const memories: Memory[] = (Array.isArray(parsed) ? parsed : []).map(memoryFromJson);
-						lastMemories = memories.length ? memories : lastMemories;
-
-						// Concept match — simple substring
-						const allConcepts: any[] = parseJson<any[]>(conceptResult.stdout) ?? [];
-						const q = params.query.toLowerCase();
-						const matchedConcepts = allConcepts.filter(c =>
-							c.name?.toLowerCase().includes(q) || c.description?.toLowerCase().includes(q)
-						);
-
-						let text = "";
-						if (memories.length) {
-							text += `${memories.length} memory result(s):\n\n`;
-							text += memories.map(m => {
-								const header = `[${m.type}] [${m.id.slice(0, 8)}] imp:${m.importance}${m.scopes[0] ? ` (${m.scopes[0]})` : ""}`;
-								return `${header}\n${m.content}`;
-							}).join("\n\n");
-						}
-						if (matchedConcepts.length) {
-							if (text) text += "\n\n";
-							text += `${matchedConcepts.length} concept(s) matching "${params.query}":\n`;
-							text += matchedConcepts.map(c => {
-								let s = `[concept] [${c.id.slice(0, 8)}] ${c.name}`;
-								if (c.description) s += ` — ${c.description}`;
-								if (c.scope) s += ` (${c.scope})`;
-								return s;
-							}).join("\n");
-						}
-						if (!text) text = `No memories or concepts found for "${params.query}".`;
+						let text = `${memories.length} memory result(s):\n\n`;
+						text += memories.map(m => {
+							const header = `[${m.type}] [${m.id.slice(0, 8)}] imp:${m.importance}${m.scopes[0] ? ` (${m.scopes[0]})` : ""}`;
+							return `${header}\n${m.content}`;
+						}).join("\n\n");
 
 						return {
 							content: [{ type: "text", text }],
-							details: { action: "recall", memories, message: `${memories.length} memories, ${matchedConcepts.length} concepts` } as MemoryDetails,
+							details: { action: "recall", memories, message: `${memories.length} memories` } as MemoryDetails,
 						};
 					}
 
@@ -506,78 +450,35 @@ Actions:
 						if (params.note) args.push("--note", params.note);
 
 						const { stdout, code } = await execVoidm(args);
-						if (code !== 0) return err("relate", parseJson<any>(stdout)?.error ?? stdout);
-						const msg = `Linked [${params.from_id.slice(0, 8)}] -[${params.rel}]→ [${params.to_id.slice(0, 8)}]`;
-						return {
-							content: [{ type: "text", text: msg }],
-							details: { action: "relate", memories: lastMemories, message: msg } as MemoryDetails,
-						};
-					}
-
-					// ── concept_add ───────────────────────────────────────────────────────
-					case "concept_add": {
-						if (!params.name) return err("concept_add", "name is required");
-						const args = ["ontology", "concept", "add", params.name, "--json"];
-						if (params.description) args.push("--description", params.description);
-						if (params.scope)       args.push("--scope", params.scope);
-
-						const { stdout, code } = await execVoidm(args);
-						if (code !== 0) return err("concept_add", parseJson<any>(stdout)?.error ?? stdout);
-						const concept = parseJson<any>(stdout);
-						if (!concept?.id) return err("concept_add", "unexpected response");
-
-						const msg = `Concept created: ${concept.name} [${concept.id.slice(0, 8)}]${concept.description ? ` — ${concept.description}` : ""}`;
-						return {
-							content: [{ type: "text", text: msg }],
-							details: { action: "concept_add", memories: lastMemories, message: msg } as MemoryDetails,
-						};
-					}
-
-					// ── concept_get ───────────────────────────────────────────────────────
-					case "concept_get": {
-						if (!params.id) return err("concept_get", "id is required");
-						const { stdout, code } = await execVoidm(["ontology", "concept", "get", params.id, "--json"]);
-						if (code !== 0) return err("concept_get", parseJson<any>(stdout)?.error ?? stdout);
-						const c = parseJson<any>(stdout);
-						if (!c?.id) return err("concept_get", "not found");
-
-						let text = `[${c.id.slice(0, 8)}] ${c.name}`;
-						if (c.description) text += `\n  ${c.description}`;
-						if (c.scope)       text += `\n  scope: ${c.scope}`;
-						if (c.superclasses?.length) text += `\n  IS_A: ${c.superclasses.map((x: any) => x.name).join(", ")}`;
-						if (c.subclasses?.length)   text += `\n  Subclasses: ${c.subclasses.map((x: any) => x.name).join(", ")}`;
-						if (c.instances?.length) {
-							text += `\n  Instances (${c.instances.length}):`;
-							for (const inst of c.instances.slice(0, 5)) {
-								text += `\n    [${inst.memory_id.slice(0, 8)}] ${inst.preview}`;
+						if (code !== 0) {
+							const error = parseJson<any>(stdout)?.error ?? stdout;
+							// Better error message for ambiguous IDs
+							if (error.includes("ambiguous")) {
+								return err("relate", `${error}\n\nUse more characters or the full memory ID.`);
 							}
-							if (c.instances.length > 5) text += `\n    … ${c.instances.length - 5} more`;
-						} else {
-							text += `\n  Instances: none`;
+							return err("relate", error);
 						}
 
-						return {
-							content: [{ type: "text", text }],
-							details: { action: "concept_get", memories: lastMemories, message: text } as MemoryDetails,
-						};
+						try {
+							const parsed = parseJson<any>(stdout);
+							if (parsed?.result) {
+								const rel_data = parsed.result;
+								const msg = `Linked [${rel_data.from_id.slice(0, 8)}] -[${rel_data.rel}]→ [${rel_data.to_id.slice(0, 8)}]`;
+								return {
+									content: [{ type: "text", text: msg }],
+									details: {
+										action: "relate",
+										memories: lastMemories,
+										message: msg
+									} as MemoryDetails,
+								};
+							}
+							return err("relate", parsed?.error ?? "Failed to relate memories");
+						} catch (e) {
+							return err("relate", `Failed to parse response: ${e}`);
+						}
 					}
 
-					// ── link_to_concept ───────────────────────────────────────────────────
-					case "link_to_concept": {
-						if (!params.memory_id) return err("link_to_concept", "memory_id is required");
-						if (!params.id)        return err("link_to_concept", "id (concept) is required");
-
-						const args = ["ontology", "link", params.memory_id, "--from-kind", "memory",
-							"INSTANCE_OF", params.id, "--to-kind", "concept", "--json"];
-						const { stdout, code } = await execVoidm(args);
-						if (code !== 0) return err("link_to_concept", parseJson<any>(stdout)?.error ?? stdout);
-
-						const msg = `Memory [${params.memory_id.slice(0, 8)}] is now an instance of concept [${params.id.slice(0, 8)}]`;
-						return {
-							content: [{ type: "text", text: msg }],
-							details: { action: "link_to_concept", memories: lastMemories, message: msg } as MemoryDetails,
-						};
-					}
 
 					// ── delete ────────────────────────────────────────────────────────────
 					case "delete": {
@@ -585,20 +486,43 @@ Actions:
 
 						const args = ["delete", params.memory_id, "--yes", "--json"];
 						const { stdout, code } = await execVoidm(args);
+
 						if (code !== 0) {
 							const error = parseJson<any>(stdout)?.error ?? stdout;
 							return err("delete", error);
 						}
 
-						// Remove from cache
-						lastMemories = lastMemories.filter(m => !m.id.startsWith(params.memory_id));
+						try {
+							const parsed = parseJson<any>(stdout);
+							if (parsed?.result?.deleted) {
+								const count = parsed.result.count || 1;
+								const ids = parsed.result.ids || [];
 
-						const msg = `Deleted memory [${params.memory_id}]`;
-						return {
-							content: [{ type: "text", text: msg }],
-							details: { action: "delete", memories: [...lastMemories], message: msg } as MemoryDetails,
-						};
+								// Remove from cache
+								lastMemories = lastMemories.filter(m => !ids.some(id => m.id.startsWith(id)));
+
+								// Format response based on count
+								let message = "";
+								if (count === 1) {
+									message = `Deleted memory [${ids[0].slice(0, 8)}]`;
+								} else {
+									message = `Deleted ${count} memories:\n${ids.map((id: string) => `  • [${id.slice(0, 8)}]"`).join("\n")}`;
+								}
+
+								return {
+									content: [{ type: "text", text: message }],
+									details: {
+										action: "delete",
+										memories: lastMemories,
+										message
+									} as MemoryDetails,
+							};
+						}
+						return err("delete", parsed?.error ?? "Failed to delete memory");
+					} catch (e) {
+						return err("delete", `Failed to parse response: ${e}`);
 					}
+				}
 
 					default:
 						return err("memory", `Unknown action: ${(params as any).action}`);
@@ -610,16 +534,12 @@ Actions:
 
 		renderCall(args, theme) {
 			const actionColor: Record<string, ThemeColor> = {
-				remember: "success", recall: "accent", relate: "muted",
-				concept_add: "warning", concept_get: "warning", link_to_concept: "warning",
-				delete: "error",
+				remember: "success", recall: "accent", relate: "muted", delete: "error",
 			};
 			const col = actionColor[args.action] ?? "muted" as ThemeColor;
 			let text = theme.fg("toolTitle", "memory ") + theme.fg(col, args.action);
 			if (args.query)   text += " " + theme.fg("dim", `"${oneLine(args.query, 40)}"`);
 			if (args.content) text += " " + theme.fg("dim", `"${oneLine(args.content, 40)}"`);
-			if (args.name)    text += " " + theme.fg("dim", args.name);
-			if (args.id)      text += " " + theme.fg("dim", args.id);
 			if (args.intent)  text += " " + theme.fg("accent", `intent:"${args.intent}"`);
 			if (args.memory_id && args.action === "delete") {
 				text += " " + theme.fg("dim", `[${args.memory_id.slice(0, 8)}]`);
@@ -657,12 +577,6 @@ Actions:
 					return new Text(t, 0, 0);
 				}
 				case "relate":
-					return new Text(theme.fg("success", "✓ ") + theme.fg("muted", d.message ?? "linked"), 0, 0);
-				case "concept_add":
-					return new Text(theme.fg("success", "✓ ") + theme.fg("warning", d.message ?? "concept created"), 0, 0);
-				case "concept_get":
-					return new Text(theme.fg("warning", "◆ ") + theme.fg("muted", d.message?.split("\n")[0] ?? "concept"), 0, 0);
-				case "link_to_concept":
 					return new Text(theme.fg("success", "✓ ") + theme.fg("muted", d.message ?? "linked"), 0, 0);
 				case "delete":
 					return new Text(theme.fg("error", "✗ ") + theme.fg("muted", d.message ?? "deleted"), 0, 0);

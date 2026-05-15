@@ -3,8 +3,9 @@
 A [pi-coding-agent](https://github.com/badlogic/pi-mono) extension that gives the agent persistent memory via [voidm](https://github.com/autonomous-toaster/voidm).
 
 Provides:
-- **`memory` tool** — add, search, list, delete, link, graph neighbors, pagerank, and Cypher queries
-- **`voidm` skill** — agent usage guide: types, edge selection, insertion workflow
+- **`memory` tool** — remember, recall, relate, and delete persistent memories
+- **`voidm` skill** — CLI-oriented usage guide for direct graph/search workflows
+- **`memory` skill** — agent-facing guidance for storing and recalling useful knowledge
 
 ## Requirements
 
@@ -42,15 +43,23 @@ export VOIDM_BIN=/usr/local/bin/voidm
 
 ## Usage
 
-Once installed, the agent has access to the `memory` tool. It is the preferred interface — use it instead of calling the CLI directly.
+Once installed, the agent has access to the `memory` tool. It is the preferred interface for persistent memory workflows.
 
-```
-memory action=add content="..." type=semantic scope=work/acme
-memory action=search query="deployment"
-memory action=cypher cypher_query="MATCH (a:Memory)-[r]->(b:Memory) RETURN a.memory_id AS from, r.rel_type AS rel, b.memory_id AS to LIMIT 20"
+```text
+memory action=remember content="Docker is required for local integration tests" type=semantic scope=work/backend
+memory action=recall query="integration tests docker" min_score=0.7
+memory action=relate from_id="mem_..." rel="SUPPORTS" to_id="mem_..."
+memory action=delete memory_id="mem_..."
 ```
 
-See `voidm instructions` or load the `voidm` skill for the full agent guide.
+### Retrieval guidance
+
+For agent recall, prefer a higher threshold to avoid polluting context with weak matches:
+
+- recommended default: `min_score=0.7`
+- lower only when you intentionally want broader recall
+
+See the bundled `memory` and `voidm` skills for the full guide.
 
 ## License
 
