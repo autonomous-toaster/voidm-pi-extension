@@ -225,6 +225,15 @@ const MemoryParams = Type.Object({
 
 export default function (pi: ExtensionAPI) {
 	// ---------------------------------------------------------------------------
+	// session_start — silent data-quality repair (fast, no model loading)
+	// ---------------------------------------------------------------------------
+	pi.on("session_start", async (_e, _ctx) => {
+		// Fire-and-forget: remove orphaned chunks, check system health.
+		// Does not block startup and never shows output to the agent.
+		execVoidm(["repair", "--orphans-only", "--json"]).catch(() => {});
+	});
+
+	// ---------------------------------------------------------------------------
 	// Helper: Detect task type and suggest relevant user behavior query
 	// ---------------------------------------------------------------------------
 	function detectBehaviorQuery(promptHint: string): string | null {
